@@ -16,8 +16,9 @@ pkg install -y python git termux-api android-tools
 - `android-tools` provides the `adb` binary.
 - `termux-api` exposes clipboard access for the collector workflow.
 
-## 3. Install Termux:API companion app
-From F-Droid or the Play Store, install **Termux:API** (matches the CLI package) so `termux-clipboard-get` works.
+## 3. Install Termux companion apps
+- **Termux:API** (F-Droid/Play Store) — unlocks clipboard + toast commands.
+- **Termux:Widget** — optional but recommended; lets you pin one-tap scripts (used for captions).
 
 ## 4. Clone or copy this project
 Place the repo (or the two scripts plus data folders) under `~/Documents/Space/scoopz`. Adjust paths in the commands below if you keep it elsewhere.
@@ -35,8 +36,16 @@ python -m pip install --upgrade pip
 ```bash
 pip install -r requirements.txt
 ```
-This installs `adbutils`, `uiautomator2`, `yt-dlp`, and `watchdog`.
+This installs `adbutils`, `uiautomator2`, `requests`, and friends.
 > Global Python users: just run the same command without activating `.venv`; it installs system-wide.
+
+After dependencies finish, source the helper aliases once per shell:
+
+```bash
+source ~/scoopz/scoopz_env.sh
+```
+
+Add that line to `~/.bashrc` (already shown at the top of `scoopz_env.sh`) so commands such as `collect`, `next-caption`, and `upload` are always available.
 
 ## 7. Enable wireless ADB on the phone
 1. Enable Developer Options and USB debugging.
@@ -79,20 +88,49 @@ Whenever the phone chooses a new wireless debugging port/IP, edit `~/.config/sco
 ## 9. Prepare persistent data files (first run only)
 The scripts auto-create their data files (`data/queue.json`, `data/urls.txt`, `data/uploaded.json`) and download/log directories. No manual work is required, but you can wipe them if you want to reset state.
 
-## 10. Running the workflows
+## 10. Running the workflows (faster command layer)
+All shell commands below assume you already ran `source ~/scoopz/scoopz_env.sh` (or opened a new Termux session after adding it to `.bashrc`).
+
 - Start the collector before opening TikTok:
   ```bash
-  source .venv/bin/activate   # skip this line if you use global Python
-  python collector.py
+  collect
   ```
-  Leave it running while you browse. Every Share → Copy Link action queues and downloads clips in the background.
+  Leave it running while you browse. Each Share → Copy Link event gets detected, downloaded, and mirrored to both `downloads/` and `~/storage/shared/scoopz_downloads/`.
 
-- When you are ready to post on NewsBreak, make sure you are on the upload page inside the app, then run:
+- Captions are generated automatically: every downloaded MP4 gets a sibling `.txt` built from the TikTok title plus the standard tags `#viral #trending #funny #interesting #scoopz`.
+
+- Before posting in NewsBreak, tap the caption helper:
   ```bash
-  source .venv/bin/activate   # skip if using global Python
-  python uploader.py
+  next-caption
   ```
-  The bot uploads up to 40 fresh videos from `downloads/`, copies each file to `~/storage/shared/scoopz_downloads/`, reuses the default caption, and logs progress to `logs/uploader.log`.
+  This copies the oldest caption to the clipboard, shows a toast (when Termux:API is installed), and moves the matching MP4/TXT pair into `downloads/done/` so you never double-post.
 
-## 11. Stopping the services
+- Ready to publish? Plug into ADB (or use wireless) and run:
+  ```bash
+  upload
+  ```
+  The bot uploads up to 40 fresh videos, pasting from `~/storage/shared/scoopz_downloads/`.
+
+## 11. Optional one-tap caption widget
+1. Install Termux:Widget (Step 3) and long-press the Android home screen.
+2. Run once inside Termux:
+   ```bash
+   install-next-caption-widget
+   ```
+   This creates `~/.shortcuts/next-caption.sh`, the script Termux:Widget will call.
+3. Add the Termux:Widget to your home screen and pick `next-caption` from the list.
+
+Daily flow: tap the widget on your way to NewsBreak; it copies the next caption, shows the first 40 characters via toast, and archives the matching media. No extra steps when you reach the caption box—just paste.
+
+## 12. Clearing storage when space gets tight
+Run the built-in cleaner whenever Termux storage or shared gallery space starts to fill up:
+
+```bash
+scoopz-clean           # deletes everything
+scoopz-clean 5         # keep newest 5 videos, purge the rest
+```
+
+It removes old MP4/TXT pairs from `downloads/`, empties `downloads/done/`, wipes `~/storage/shared/scoopz_downloads/`, and triggers `termux-media-scan` so the Android gallery refreshes instantly.
+
+## 13. Stopping the services
 Press `Ctrl+C` in Termux to stop either script. Both maintain persistent queues/state so you can resume later without losing progress.
