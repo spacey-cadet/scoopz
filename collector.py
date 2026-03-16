@@ -19,7 +19,9 @@ BASE_DIR     = Path(__file__).resolve().parent
 DATA_DIR     = BASE_DIR / "data"
 LOG_DIR      = BASE_DIR / "logs"
 DOWNLOAD_DIR = BASE_DIR / "downloads"
-SHARED_EXPORT_DIR = Path.home() / "storage" / "shared" / "scoopz_downloads"
+SHARED_EXPORT_DIR = (
+    Path.home() / "storage" / "shared" / "Pictures" / "scoopz"
+)
 
 for path in (DATA_DIR, LOG_DIR, DOWNLOAD_DIR):
     path.mkdir(parents=True, exist_ok=True)
@@ -43,7 +45,7 @@ INBOX_POLL_INTERVAL     = 2.0    # seconds between inbox reads
 MAX_DOWNLOAD_WORKERS    = 5      # parallel downloads
 DOWNLOAD_BATCH_SIZE     = 5
 MAX_DOWNLOAD_RETRIES    = 3
-TIKWM_API               = "https://tikwm.com/api/"
+TIKWM_API               = "https://www.tikwm.com/api/"
 CAPTION_TAGS            = "#viral #trending #funny #interesting #scoopz"
 CAPTION_FALLBACK        = "What's your take on this?"
 
@@ -169,6 +171,15 @@ class PersistentQueue:
     async def size(self) -> int:
         async with self.lock:
             return len(self._queue)
+
+    async def pop_one(self) -> str | None:
+        async with self.lock:
+            if not self._queue:
+                return None
+            url = self._queue.popleft()
+            self._seen.discard(url)
+            self._persist()
+            return url
 
 # ── Clipboard monitor → writes to inbox ──────────────────────────────────────
 class ClipboardMonitor:
@@ -306,12 +317,13 @@ class Downloader:
     async def run_forever(self) -> None:
         log.info("Downloader started — %d parallel workers", MAX_DOWNLOAD_WORKERS)
         active: set[asyncio.Task[DownloadResult]] = set()
+        completed = 0
+        failed = 0
         while True:
             while len(active) < MAX_DOWNLOAD_WORKERS:
-                batch = await self.queue.pop_batch(1)
-                if not batch:
+                url = await self.queue.pop_one()
+                if not url:
                     break
-                url = batch[0]
                 task = asyncio.create_task(self._download_with_semaphore(url))
                 active.add(task)
 
@@ -319,17 +331,29 @@ class Downloader:
                 await asyncio.sleep(0.5)
                 continue
 
+            queued = await self.queue.size()
+            print(
+                f"\r  ⬇ {len(active)}/{MAX_DOWNLOAD_WORKERS} downloading  "
+                f"| ✅ {completed} done  "
+                f"| ❌ {failed} failed  "
+                f"| 🕐 {queued} queued    ",
+                end="",
+                flush=True,
+            )
+
             done, active = await asyncio.wait(
                 active, return_when=asyncio.FIRST_COMPLETED
             )
             for task in done:
                 result = await task
                 if result.success:
-                    log.info("✅ Downloaded: %s", result.url)
-                    print(f"  ✅ Downloaded: {result.url}")
+                    completed += 1
+                    log.info("✅ %s", result.url)
+                    print(f"\n  ✅ [{completed}] {Path(result.url).name}")
                 else:
-                    log.error("❌ Failed: %s | %s", result.url, result.error)
-                    print(f"  ❌ Failed: {result.url} — {result.error}")
+                    failed += 1
+                    log.error("❌ %s | %s", result.url, result.error)
+                    print(f"\n  ❌ Failed: {result.error}")
 
     async def _download_with_semaphore(self, url: str) -> DownloadResult:
         async with self.sem:
@@ -348,7 +372,7 @@ class Downloader:
 
     def _fetch_via_tikwm(self, url: str) -> None:
         """Download video via tikwm.com API — no watermark, no yt-dlp."""
-        resp = requests.get(TIKWM_API, params={"url": url}, timeout=30)
+        resp = requests.get(TIKWM_API, params={"url": url, "hd": "1"}, timeout=30)
         resp.raise_for_status()
         data = resp.json()
 
