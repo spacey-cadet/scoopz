@@ -40,8 +40,8 @@ URL_LOG_PATH.touch(exist_ok=True)
 # ── Config ────────────────────────────────────────────────────────────────────
 CLIPBOARD_POLL_INTERVAL = 1.0    # seconds between clipboard checks
 INBOX_POLL_INTERVAL     = 2.0    # seconds between inbox reads
-MAX_DOWNLOAD_WORKERS    = 3      # parallel downloads
-DOWNLOAD_BATCH_SIZE     = 20
+MAX_DOWNLOAD_WORKERS    = 5      # parallel downloads
+DOWNLOAD_BATCH_SIZE     = 5
 MAX_DOWNLOAD_RETRIES    = 3
 TIKWM_API               = "https://tikwm.com/api/"
 CAPTION_TAGS            = "#viral #trending #funny #interesting #scoopz"
@@ -302,23 +302,25 @@ class Downloader:
 
     async def run_forever(self) -> None:
         log.info("Downloader started — %d parallel workers", MAX_DOWNLOAD_WORKERS)
+        active: set[asyncio.Task[DownloadResult]] = set()
         while True:
-            if await self.queue.size() == 0:
-                await asyncio.sleep(1)
+            while len(active) < MAX_DOWNLOAD_WORKERS:
+                batch = await self.queue.pop_batch(1)
+                if not batch:
+                    break
+                url = batch[0]
+                task = asyncio.create_task(self._download_with_semaphore(url))
+                active.add(task)
+
+            if not active:
+                await asyncio.sleep(0.5)
                 continue
 
-            batch = await self.queue.pop_batch(DOWNLOAD_BATCH_SIZE)
-            if not batch:
-                await asyncio.sleep(1)
-                continue
-
-            log.info("Processing batch of %d", len(batch))
-            tasks = [
-                asyncio.create_task(self._download_with_semaphore(url))
-                for url in batch
-            ]
-            for coro in asyncio.as_completed(tasks):
-                result = await coro
+            done, active = await asyncio.wait(
+                active, return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in done:
+                result = await task
                 if result.success:
                     log.info("✅ Downloaded: %s", result.url)
                     print(f"  ✅ Downloaded: {result.url}")
