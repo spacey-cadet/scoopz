@@ -1,0 +1,4 @@
+adbutils==1.0.5
+uiautomator2==2.20.2
+yt-dlp==2024.3.10
+watchdog==4.0.0
