@@ -172,13 +172,10 @@ class PersistentQueue:
 
 # ── Clipboard monitor → writes to inbox ──────────────────────────────────────
 class ClipboardMonitor:
-    """
-    Polls clipboard every second.
-    Any new TikTok URL gets appended to links_inbox.txt (the buffer).
-    Does NOT touch the download queue directly — InboxWatcher handles that.
-    """
+    """Poll the clipboard and push URLs straight into the queue."""
 
-    def __init__(self) -> None:
+    def __init__(self, queue: PersistentQueue) -> None:
+        self.queue = queue
         self._last: str | None = None
         self._running = False
         self._known: set[str] = set(
@@ -228,6 +225,12 @@ class ClipboardMonitor:
 
         print(f"[Clipboard] Captured: {url}")
         log.info("Captured to inbox: %s", url)
+        asyncio.create_task(self._enqueue(url))
+
+    async def _enqueue(self, url: str) -> None:
+        added = await self.queue.add(url)
+        if added:
+            print(f"[Queue] Added: {url}")
 
     @staticmethod
     def _read_clipboard() -> str:
@@ -389,7 +392,7 @@ class CollectorService:
 
     def __init__(self) -> None:
         self.queue    = PersistentQueue()
-        self.monitor  = ClipboardMonitor()
+        self.monitor  = ClipboardMonitor(self.queue)
         self.watcher  = InboxWatcher(self.queue)
         self.loader   = Downloader(self.queue)
         self._tasks: list[asyncio.Task] = []
