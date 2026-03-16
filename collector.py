@@ -14,7 +14,7 @@ from typing import Awaitable, Callable, Deque, List
 
 from logging.handlers import RotatingFileHandler
 
-import yt_dlp
+import requests
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
@@ -37,7 +37,7 @@ MAX_DOWNLOAD_WORKERS = 3
 DOWNLOAD_BATCH_SIZE = 20
 MAX_DOWNLOAD_RETRIES = 3
 
-TIKTOK_REGEX = re.compile(r"https?://(?:www\.)?tiktok\.com/\S+", re.IGNORECASE)
+TIKTOK_REGEX = re.compile(r"https?://(?:(?:www|vt|vm)\.)?tiktok\.com/\S+", re.IGNORECASE)
 
 
 def setup_logger(name: str, log_path: Path, level: int = logging.INFO) -> logging.Logger:
@@ -213,7 +213,7 @@ class Downloader:
     async def _download_with_retries(self, url: str) -> DownloadResult:
         for attempt in range(1, MAX_DOWNLOAD_RETRIES + 1):
             try:
-                await asyncio.to_thread(self._run_yt_dlp, url)
+                await asyncio.to_thread(self._run_tikwm, url)
                 return DownloadResult(url=url, success=True)
             except Exception as exc:  # noqa: BLE001
                 if attempt == MAX_DOWNLOAD_RETRIES:
@@ -221,16 +221,21 @@ class Downloader:
                 await asyncio.sleep(2 * attempt)
         return DownloadResult(url=url, success=False, error="Unknown error")
 
-    def _run_yt_dlp(self, url: str) -> None:
-        opts = {
-            "outtmpl": str(self.download_dir / "%(id)s.%(ext)s"),
-            "quiet": True,
-            "noprogress": True,
-            "merge_output_format": "mp4",
-            "format": "mp4/best",
-        }
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.download([url])
+    def _run_tikwm(self, url: str) -> None:
+        api = "https://tikwm.com/api/"
+        resp = requests.get(api, params={"url": url}, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code") != 0:
+            raise RuntimeError(f"tikwm error: {data.get('msg')}")
+        video_url = data["data"]["play"]
+        video_id = data["data"]["id"]
+        out_path = self.download_dir / f"{video_id}.mp4"
+        with requests.get(video_url, stream=True, timeout=60) as r:
+            r.raise_for_status()
+            with open(out_path, "wb") as handle:
+                for chunk in r.iter_content(chunk_size=8192):
+                    handle.write(chunk)
 
 
 class CollectorService:
