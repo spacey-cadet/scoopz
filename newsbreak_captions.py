@@ -414,6 +414,7 @@ def generate_caption(api_key, file_uri):
    - Use 2 to 4 relevant emojis placed naturally within the caption
    - Do NOT use hashtags inside the caption
    - Between 15 and 25 words TOTAL — count carefully before responding
+   - Caption + hashtags combined must not exceed 150 characters total — count every character including spaces and emojis
    - If NO location is detected, do not invent or guess one
 
 2. Between 4 and 7 hashtags for NewsBreak platform (no spaces, all lowercase, prefixed with #)
@@ -542,6 +543,22 @@ def main():
                 file_uri, file_name = upload_video(api_key, compressed)
                 wait_for_processing(api_key, file_name)
                 result = generate_caption(api_key, file_uri)
+
+                # Cap total output (caption + hashtags) at 150 characters
+                if "CAPTION:" in result and "HASHTAGS:" in result:
+                    parts = result.split("HASHTAGS:")
+                    caption_text = parts[0].replace("CAPTION:", "").strip()
+                    hashtag_text = parts[1].strip()
+
+                    # Build combined string and trim to 150 total
+                    combined = caption_text + " " + hashtag_text
+                    if len(combined) > 150:
+                        combined = combined[:150].rsplit(' ', 1)[0]
+
+                    result = combined.strip()
+                else:
+                    if len(result) > 150:
+                        result = result[:150].rsplit(' ', 1)[0]
 
                 copy_to_clipboard(result)
                 caption_ready.set()
