@@ -1,136 +1,210 @@
-# Termux Setup Guide
+# Scoopz Setup Guide (Current Workflow)
 
-Follow these steps once on your Android device inside Termux.
+This guide reflects the current scripts in this project:
+- collector.py
+- newsbreak_captions.py
+- scoopz_env.sh
+- newsbreak_captions.sh (legacy helper)
 
-## 1. Grant storage access
+## What Changed
+
+The workflow is now split into two independent stages:
+1. Collect TikTok videos into the Scoopz folder.
+2. Pick any saved video and generate a NewsBreak-ready caption with Gemini.
+
+The old upload pipeline referenced in scoopz_env.sh (for example uploader.py, downloads/, data/queue.json) is not present in this repository anymore.
+
+## Runtime Overview
+
+- collector.py watches a link inbox file and auto-downloads TikTok videos.
+- newsbreak_captions.py launches a local web picker with thumbnails, then generates caption + hashtags and copies output to clipboard.
+- Both scripts are designed for Termux on Android paths (/sdcard/..., termux-* commands).
+
+## Prerequisites (Termux)
+
+Install required packages:
+
+```bash
+pkg update && pkg upgrade -y
+pkg install -y python ffmpeg termux-api
+pip install --upgrade pip
+pip install requests
+```
+
+Give Termux storage permission (required for /sdcard access):
+
 ```bash
 termux-setup-storage
 ```
-This creates the `~/storage` bridge. The automation scripts copy finished downloads into `~/storage/shared/scoopz_downloads` so NewsBreak can see them.
 
-## 2. Install core packages
-```bash
-pkg update -y && pkg upgrade -y
-pkg install -y python git termux-api android-tools
-```
-- `android-tools` provides the `adb` binary.
-- `termux-api` exposes clipboard access for the collector workflow.
+## Required Folders and Files
 
-## 3. Install Termux companion apps
-- **Termux:API** (F-Droid/Play Store) — unlocks clipboard + toast commands.
-- **Termux:Widget** — optional but recommended; lets you pin one-tap scripts (used for captions).
+The code expects these locations:
 
-## 4. Clone or copy this project
-Place the repo (or the two scripts plus data folders) under `~/Documents/Space/scoopz`. Adjust paths in the commands below if you keep it elsewhere.
+- Video output folder: /sdcard/Pictures/scoopz
+- URL inbox file: /sdcard/Download/links_inbox.txt
+- Download history file: /sdcard/Download/scoopz_history.log
+- Gemini key file: ~/.config/gemini_key.txt
 
-## 5. Create a Python virtual environment (recommended)
-```bash
-cd ~/Documents/Space/scoopz
-python -m venv .venv
-source .venv/bin/activate
-python -m pip install --upgrade pip
-```
-> Prefer a venv so Scoopz dependencies stay isolated. If you already keep the scripts plus dependencies in the global Termux Python, skip this step and the later `source .venv/bin/activate` commands.
-
-## 6. Install Python dependencies
-```bash
-pip install -r requirements.txt
-```
-This installs `adbutils`, `uiautomator2`, `requests`, and friends.
-> Global Python users: just run the same command without activating `.venv`; it installs system-wide.
-
-After dependencies finish, source the helper aliases once per shell:
+Create missing files/folders:
 
 ```bash
-source ~/scoopz/scoopz_env.sh
-```
-
-Add that line to `~/.bashrc` (already shown at the top of `scoopz_env.sh`) so commands such as `collect`, `next-caption`, and `upload` are always available.
-
-## 7. Enable wireless ADB on the phone
-1. Enable Developer Options and USB debugging.
-2. Connect the phone to a PC (or to itself via Termux if already rooted) and run:
-   ```bash
-   adb devices
-   adb tcpip 5555
-   adb connect 127.0.0.1:5555    # replace with actual IP if connecting from another device
-   ```
-3. Back in Termux, verify the connection:
-   ```bash
-   adb devices
-   ```
-   You should see `127.0.0.1:5555` (or your device IP) listed. `collector.py` and `uploader.py` use this host/port.
-
-## 8. Pin the default ADB target in Termux (recommended)
-Create a small env file that exports the device you just connected to so every Termux shell, Python script, or `adb` call points at it automatically.
-
-```bash
+mkdir -p /sdcard/Pictures/scoopz
+mkdir -p /sdcard/Download
 mkdir -p ~/.config
-cat <<'EOF' > ~/.config/scoopz-adb.env
-export ANDROID_SERIAL=127.0.0.1:5555   # update if you use a different IP:port
-export ADBHOST=127.0.0.1
-export ADBPORT=5555
-EOF
+: > /sdcard/Download/links_inbox.txt
+: > /sdcard/Download/scoopz_history.log
 ```
 
-Source that file from your Termux shell (bash by default):
+Add your Gemini API key:
 
 ```bash
-if ! grep -q 'scoopz-adb.env' ~/.bashrc; then
-  echo 'source ~/.config/scoopz-adb.env' >> ~/.bashrc
-fi
-source ~/.bashrc
-adb devices   # now always shows the pinned IP without picking from a list
+echo "YOUR_GEMINI_API_KEY" > ~/.config/gemini_key.txt
+chmod 600 ~/.config/gemini_key.txt
 ```
 
-Whenever the phone chooses a new wireless debugging port/IP, edit `~/.config/scoopz-adb.env` and rerun `source ~/.bashrc`. Exporting `ANDROID_SERIAL` keeps `adb`, `adbutils`, and `uiautomator2` from prompting you to choose a device even if an emulator or second phone is connected.
+## Daily Workflow
 
-## 9. Prepare persistent data files (first run only)
-The scripts auto-create their data files (`data/queue.json`, `data/urls.txt`, `data/uploaded.json`) and download/log directories. No manual work is required, but you can wipe them if you want to reset state.
+### Step 1: Start collector
 
-## 10. Running the workflows (faster command layer)
-All shell commands below assume you already ran `source ~/scoopz/scoopz_env.sh` (or opened a new Termux session after adding it to `.bashrc`).
-
-- Start the collector before opening TikTok:
-  ```bash
-  collect
-  ```
-  Leave it running while you browse. Each Share → Copy Link event gets detected, downloaded, and mirrored to both `downloads/` and `~/storage/shared/scoopz_downloads/`.
-
-- Captions are generated automatically: every downloaded MP4 gets a sibling `.txt` built from the TikTok title plus the standard tags `#viral #trending #funny #interesting #scoopz`.
-
-- Before posting in NewsBreak, tap the caption helper:
-  ```bash
-  next-caption
-  ```
-  This copies the oldest caption to the clipboard, shows a toast (when Termux:API is installed), and moves the matching MP4/TXT pair into `downloads/done/` so you never double-post.
-
-- Ready to publish? Plug into ADB (or use wireless) and run:
-  ```bash
-  upload
-  ```
-  The bot uploads up to 40 fresh videos, pasting from `~/storage/shared/scoopz_downloads/`.
-
-## 11. Optional one-tap caption widget
-1. Install Termux:Widget (Step 3) and long-press the Android home screen.
-2. Run once inside Termux:
-   ```bash
-   install-next-caption-widget
-   ```
-   This creates `~/.shortcuts/next-caption.sh`, the script Termux:Widget will call.
-3. Add the Termux:Widget to your home screen and pick `next-caption` from the list.
-
-Daily flow: tap the widget on your way to NewsBreak; it copies the next caption, shows the first 40 characters via toast, and archives the matching media. No extra steps when you reach the caption box—just paste.
-
-## 12. Clearing storage when space gets tight
-Run the built-in cleaner whenever Termux storage or shared gallery space starts to fill up:
+From project folder:
 
 ```bash
-scoopz-clean           # deletes everything
-scoopz-clean 5         # keep newest 5 videos, purge the rest
+python collector.py
 ```
 
-It removes old MP4/TXT pairs from `downloads/`, empties `downloads/done/`, wipes `~/storage/shared/scoopz_downloads/`, and triggers `termux-media-scan` so the Android gallery refreshes instantly.
+What happens:
+- The script polls /sdcard/Download/links_inbox.txt every 0.5s.
+- Any TikTok URL found is queued.
+- Up to 5 downloads run in parallel.
+- Files are saved as /sdcard/Pictures/scoopz/<video_id>.mp4.
+- Duplicate video IDs are skipped using /sdcard/Download/scoopz_history.log.
+- Termux notifications confirm active status and completed downloads.
 
-## 13. Stopping the services
-Press `Ctrl+C` in Termux to stop either script. Both maintain persistent queues/state so you can resume later without losing progress.
+How to feed links:
+- Put TikTok links into /sdcard/Download/links_inbox.txt (one per line).
+- Once read, the inbox is cleared automatically.
+
+### Step 2: Generate captions
+
+In another Termux session:
+
+```bash
+python newsbreak_captions.py
+```
+
+What happens:
+- Script scans /sdcard/Pictures/scoopz for mp4 files.
+- It generates thumbnail previews in /sdcard/Pictures/scoopz/.thumbs.
+- It starts local server on 127.0.0.1:8765.
+- A persistent notification opens the picker page.
+- Tap a video card to process that video.
+- The selected video is compressed, uploaded to Gemini, analyzed, then deleted from Gemini.
+- Output is returned as:
+  - caption
+  - hashtags
+- Final text is clipped to max 150 characters and copied to clipboard.
+
+## How the Code Works
+
+## collector.py
+
+Main responsibilities:
+- Inbox watcher:
+  - watch_inbox() reads links_inbox.txt, extracts TikTok URLs, pushes to async queue.
+- Download workers:
+  - download_worker() calls TikWM API with retry logic.
+  - Downloads clip["play"] stream to mp4.
+- History dedupe:
+  - add_to_history() persists video IDs to scoopz_history.log.
+- Notifications:
+  - send_notification() posts low-priority Termux notifications.
+- Runtime:
+  - run() starts watcher + N workers and keeps process alive.
+
+Important settings at top:
+- MAX_WORKERS = 5
+- POLL_RATE = 0.5
+- TIKWM_API = https://www.tikwm.com/api/
+
+## newsbreak_captions.py
+
+Main responsibilities:
+- UI and video selection:
+  - build_html() renders mobile grid UI.
+  - Handler.do_GET() handles /, /pick, /status.
+- Thumbnail pipeline:
+  - generate_thumbnails() uses ffmpeg to create first-frame jpg.
+- Gemini pipeline:
+  - compress_video() reduces upload size.
+  - upload_video() uploads via resumable API.
+  - wait_for_processing() waits for ACTIVE state.
+  - generate_caption() sends prompt and retries on 429 limits.
+  - format_result() enforces 150-char combined output.
+  - delete_file() removes uploaded Gemini file.
+- Clipboard and UX:
+  - copy_to_clipboard() stores final result.
+  - notify() and toast() provide status updates.
+
+Important settings at top:
+- MODEL = gemini-2.5-flash
+- SCOOPZ_DIR = /sdcard/Pictures/scoopz
+- TEMP_COMPRESSED = /sdcard/Download/nb_caption_compressed.mp4
+- PORT = 8765
+
+## Helper scripts
+
+## scoopz_env.sh
+
+Contains shell helpers and aliases, but parts of it still reference files not present in this repo:
+- uploader.py
+- downloads/
+- data/uploaded.json
+- data/queue.json
+
+You can still use it for custom command wrappers, but treat upload/status sections as legacy until updated to the current collector + caption workflow.
+
+## newsbreak_captions.sh
+
+This helper currently calls:
+
+```bash
+python newsbreak_caption.py "$1"
+```
+
+That filename does not exist in this repository (current script is newsbreak_captions.py), so this helper should be treated as legacy or corrected before use.
+
+## Recommended Command Set (Current)
+
+Use these as your active workflow commands:
+
+```bash
+# terminal 1
+python collector.py
+
+# terminal 2
+python newsbreak_captions.py
+```
+
+## Troubleshooting
+
+- No videos appear in picker:
+  - Verify files exist in /sdcard/Pictures/scoopz and end with .mp4.
+- Collector does not download:
+  - Confirm links are valid TikTok URLs.
+  - Confirm links are being written to /sdcard/Download/links_inbox.txt.
+- Caption script exits with key error:
+  - Check ~/.config/gemini_key.txt exists and is non-empty.
+- Port conflict on 8765:
+  - Script already tries to kill previous listener; restart script if needed.
+- Clipboard not updating:
+  - Ensure Termux:API app is installed and termux-api package is installed in Termux.
+
+## Minimal End-to-End Test
+
+1. Start collector.py.
+2. Add one TikTok URL to /sdcard/Download/links_inbox.txt.
+3. Confirm an mp4 appears in /sdcard/Pictures/scoopz.
+4. Start newsbreak_captions.py.
+5. Open picker from notification, tap video, wait for "Caption Ready".
+6. Paste clipboard output into Notes to confirm result format.

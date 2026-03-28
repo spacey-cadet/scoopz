@@ -5,7 +5,6 @@ NewsBreak Caption & Hashtag Generator
 - Tap a thumbnail → script processes that video
 - Caption + hashtags copied to clipboard
 """
-
 import subprocess
 import sys
 import os
@@ -17,7 +16,6 @@ import socket
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
-
 # ── Config ──────────────────────────────────────────────
 KEY_FILE        = os.path.expanduser("~/.config/gemini_key.txt")
 MODEL           = "gemini-2.5-flash"
@@ -27,21 +25,36 @@ TEMP_COMPRESSED = "/sdcard/Download/nb_caption_compressed.mp4"
 GEMINI_BASE     = "https://generativelanguage.googleapis.com"
 PORT            = 8765
 # ────────────────────────────────────────────────────────
-
 selected_video = None
 caption_ready  = threading.Event()
-
-
 # ── Utilities ─────────────────────────────────────────────
-
 def notify(title, msg):
-    subprocess.run(["termux-notification", "--title", title, "--content", msg])
+    """Notification with timeout to prevent hanging."""
+    try:
+        subprocess.run(
+            ["termux-notification", "--title", title, "--content", msg],
+            timeout=5,
+            capture_output=True
+        )
+    except (subprocess.TimeoutExpired, Exception):
+        pass
 
 def toast(msg):
-    subprocess.run(["termux-toast", "-s", msg])
+    """Toast with timeout to prevent hanging."""
+    try:
+        subprocess.run(
+            ["termux-toast", "-s", msg], 
+            timeout=3,
+            capture_output=True
+        )
+    except (subprocess.TimeoutExpired, Exception):
+        pass
 
 def copy_to_clipboard(text):
-    subprocess.run(["termux-clipboard-set"], input=text.encode())
+    try:
+        subprocess.run(["termux-clipboard-set"], input=text.encode(), timeout=3)
+    except (subprocess.TimeoutExpired, Exception):
+        pass
 
 def load_api_key():
     with open(KEY_FILE, "r") as f:
@@ -59,7 +72,6 @@ def kill_port(port):
         return  # already free
     except OSError:
         pass
-
     port_hex = format(port, "04X")
     inode = None
     for tcp_file in ["/proc/net/tcp", "/proc/net/tcp6"]:
@@ -74,7 +86,6 @@ def kill_port(port):
             pass
         if inode:
             break
-
     if inode:
         for fd_path in glob.glob("/proc/*/fd/*"):
             try:
@@ -85,25 +96,41 @@ def kill_port(port):
                     break
             except Exception:
                 pass
-
     time.sleep(0.8)
 
-
 # ── Thumbnails ────────────────────────────────────────────
-
 def generate_thumbnails(videos):
-    """Extract first frame from each video using ffmpeg."""
+    """Extract first frame from each video using ffmpeg with progress and error handling."""
     os.makedirs(THUMB_DIR, exist_ok=True)
-    for video_path in videos:
+    total = len(videos)
+    skipped = 0
+    
+    for idx, video_path in enumerate(videos):
+        # Show progress every 5 videos
+        if idx % 5 == 0 or idx == 0:
+            toast(f"Loading thumbnails... {idx}/{total}")
+        
         vid_name  = os.path.basename(video_path)
         thumb_path = os.path.join(THUMB_DIR, vid_name + ".jpg")
+        
         if not os.path.exists(thumb_path):
-            subprocess.run([
-                "ffmpeg", "-y", "-i", video_path,
-                "-vframes", "1", "-q:v", "3",
-                "-vf", "scale=320:-1",
-                thumb_path
-            ], capture_output=True)
+            try:
+                subprocess.run([
+                    "ffmpeg", "-y", "-i", video_path,
+                    "-vframes", "1", "-q:v", "3",
+                    "-vf", "scale=320:-1",
+                    thumb_path
+                ], capture_output=True, timeout=10)  # 10 sec timeout per video
+            except (subprocess.TimeoutExpired, Exception) as e:
+                # Skip problematic videos, continue with others
+                print(f"⚠ Skipped {vid_name}: {str(e)[:50]}")
+                skipped += 1
+                continue
+    
+    if skipped > 0:
+        toast(f"✓ Loaded {total - skipped}/{total} videos ({skipped} skipped)")
+    else:
+        toast(f"✓ Loaded {total} videos")
 
 def get_thumb_b64(video_path):
     vid_name   = os.path.basename(video_path)
@@ -113,9 +140,7 @@ def get_thumb_b64(video_path):
             return base64.b64encode(f.read()).decode()
     return ""
 
-
 # ── Web server ────────────────────────────────────────────
-
 def build_html(videos):
     cards = ""
     for i, vpath in enumerate(videos):
@@ -128,7 +153,6 @@ def build_html(videos):
             {img_tag}
             <div class="label">{size_mb:.1f}MB</div>
         </div>"""
-
     return f"""<!DOCTYPE html>
 <html>
 <head>
@@ -190,10 +214,8 @@ def build_html(videos):
 </body>
 </html>"""
 
-
 class ReusableServer(HTTPServer):
     allow_reuse_address = True
-
     def server_bind(self):
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
@@ -202,24 +224,19 @@ class ReusableServer(HTTPServer):
             pass
         super().server_bind()
 
-
 class Handler(BaseHTTPRequestHandler):
     videos = []
-
     def log_message(self, format, *args):
         pass
-
     def do_GET(self):
         global selected_video, caption_ready
         parsed = urlparse(self.path)
-
         if parsed.path == "/":
             html = build_html(self.videos)
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
             self.wfile.write(html.encode())
-
         elif parsed.path == "/pick":
             params = parse_qs(parsed.query)
             idx    = int(params.get("i", [0])[0])
@@ -230,21 +247,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(b"ok")
-
         elif parsed.path == "/status":
             ready = caption_ready.wait(timeout=180)
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
             self.wfile.write(b"done" if ready else b"timeout")
-
         else:
             self.send_response(404)
             self.end_headers()
 
-
 # ── Gemini pipeline ───────────────────────────────────────
-
 def compress_video(input_path):
     toast("Compressing...")
     if os.path.exists(TEMP_COMPRESSED):
@@ -258,15 +271,18 @@ def compress_video(input_path):
         "-movflags", "+faststart",
         TEMP_COMPRESSED
     ]
-    result = subprocess.run(cmd, capture_output=True)
-    if result.returncode != 0 or not os.path.exists(TEMP_COMPRESSED):
-        toast("Compression failed, using original...")
+    try:
+        result = subprocess.run(cmd, capture_output=True, timeout=120)
+        if result.returncode != 0 or not os.path.exists(TEMP_COMPRESSED):
+            toast("Compression failed, using original...")
+            return input_path
+        compressed_mb = os.path.getsize(TEMP_COMPRESSED) / (1024 * 1024)
+        saved = ((original_mb - compressed_mb) / original_mb) * 100
+        toast(f"{original_mb:.1f}MB -> {compressed_mb:.1f}MB ({saved:.0f}% smaller)")
+        return TEMP_COMPRESSED
+    except subprocess.TimeoutExpired:
+        toast("Compression timeout, using original...")
         return input_path
-    compressed_mb = os.path.getsize(TEMP_COMPRESSED) / (1024 * 1024)
-    saved = ((original_mb - compressed_mb) / original_mb) * 100
-    toast(f"{original_mb:.1f}MB -> {compressed_mb:.1f}MB ({saved:.0f}% smaller)")
-    return TEMP_COMPRESSED
-
 
 def upload_video(api_key, video_path):
     toast("Uploading to Gemini...")
@@ -280,7 +296,8 @@ def upload_video(api_key, video_path):
             "X-Goog-Upload-Header-Content-Type": "video/mp4",
             "Content-Type": "application/json",
         },
-        json={"file": {"display_name": "newsbreak_video"}}
+        json={"file": {"display_name": "newsbreak_video"}},
+        timeout=30
     )
     init_resp.raise_for_status()
     upload_url = init_resp.headers.get("X-Goog-Upload-URL")
@@ -296,7 +313,8 @@ def upload_video(api_key, video_path):
                 "X-Goog-Upload-Offset": "0",
                 "X-Goog-Upload-Command": "upload, finalize",
             },
-            data=video_bytes
+            data=video_bytes,
+            timeout=180
         )
         if upload_resp.status_code == 429:
             wait = (attempt + 1) * 15
@@ -308,12 +326,11 @@ def upload_video(api_key, video_path):
     file_info = upload_resp.json()
     return file_info["file"]["uri"], file_info["file"]["name"]
 
-
 def wait_for_processing(api_key, file_name):
     toast("Analysing content...")
     url = f"{GEMINI_BASE}/v1beta/{file_name}?key={api_key}"
     for _ in range(30):
-        resp  = requests.get(url)
+        resp  = requests.get(url, timeout=15)
         resp.raise_for_status()
         state = resp.json().get("state", "")
         if state == "ACTIVE":
@@ -322,7 +339,6 @@ def wait_for_processing(api_key, file_name):
             raise ValueError("Gemini failed to process the video.")
         time.sleep(3)
     raise TimeoutError("Gemini took too long.")
-
 
 def generate_caption(api_key, file_uri):
     url   = f"{GEMINI_BASE}/v1beta/models/{MODEL}:generateContent?key={api_key}"
@@ -336,7 +352,6 @@ def generate_caption(api_key, file_uri):
             "structure": "Sentence 1: strong hook. Sentence 2: a call to action (e.g. 'Follow for more!', 'Share this!', 'Tag someone!')."
         },
     ])
-
     prompt = (
         "Watch this video carefully and generate:\n\n"
         "1. A casual, conversational caption for NewsBreak.\n\n"
@@ -361,12 +376,10 @@ def generate_caption(api_key, file_uri):
         "HASHTAGS:\n"
         "[hashtags separated by spaces]"
     )
-
     payload = {"contents": [{"parts": [
         {"file_data": {"mime_type": "video/mp4", "file_uri": file_uri}},
         {"text": prompt}
     ]}]}
-
     for attempt in range(6):
         resp = requests.post(url, json=payload, timeout=120)
         if resp.status_code == 429:
@@ -378,21 +391,17 @@ def generate_caption(api_key, file_uri):
         if resp.status_code != 200:
             raise ValueError(f"Gemini API error {resp.status_code}: {resp.text[:200]}")
         return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-
     raise ValueError("Rate limit exceeded after 6 retries. Wait a minute and try again.")
-
 
 def delete_file(api_key, file_name):
     try:
-        requests.delete(f"{GEMINI_BASE}/v1beta/{file_name}?key={api_key}")
+        requests.delete(f"{GEMINI_BASE}/v1beta/{file_name}?key={api_key}", timeout=10)
     except Exception:
         pass
-
 
 def cleanup():
     if os.path.exists(TEMP_COMPRESSED):
         os.remove(TEMP_COMPRESSED)
-
 
 def format_result(result):
     """Extract caption + hashtags and enforce 150 char combined limit."""
@@ -407,85 +416,71 @@ def format_result(result):
     # Fallback
     return result[:150].rsplit(" ", 1)[0] if len(result) > 150 else result
 
-
 # ── Main ──────────────────────────────────────────────────
-
 def main():
     global selected_video
     file_name = None
     api_key   = None
-
     try:
         api_key = load_api_key()
-
         videos = sorted([
             os.path.join(SCOOPZ_DIR, f)
             for f in os.listdir(SCOOPZ_DIR)
             if f.endswith(".mp4") and not f.startswith(".")
         ], key=os.path.getmtime, reverse=True)
-
         if not videos:
             toast("No videos found in scoopz folder!")
             sys.exit(1)
-
-        toast(f"Loading {len(videos)} videos...")
+        toast(f"Found {len(videos)} videos, generating thumbnails...")
         generate_thumbnails(videos)
-
         Handler.videos = videos
         kill_port(PORT)
         server = ReusableServer(("127.0.0.1", PORT), Handler)
-
         import atexit
         atexit.register(server.shutdown)
         atexit.register(server.server_close)
-
         server_thread        = threading.Thread(target=server.serve_forever)
         server_thread.daemon = True
         server_thread.start()
-
         url = f"http://127.0.0.1:{PORT}"
         time.sleep(2)
-
-        subprocess.run([
-            "termux-notification",
-            "--title",          "NewsBreak Caption",
-            "--content",        "Tap to open video picker",
-            "--action",         f"termux-open-url {url}",
-            "--button1",        "Open Picker",
-            "--button1-action", f"termux-open-url {url}",
-            "--id",             "nb_picker",
-            "--ongoing"
-        ])
+        try:
+            subprocess.run([
+                "termux-notification",
+                "--title",          "NewsBreak Caption",
+                "--content",        "Tap to open video picker",
+                "--action",         f"termux-open-url {url}",
+                "--button1",        "Open Picker",
+                "--button1-action", f"termux-open-url {url}",
+                "--id",             "nb_picker",
+                "--ongoing"
+            ], timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+        
         toast("Tap notification to open picker")
-
         # Process videos one by one indefinitely
         while True:
             selected_video = None
             caption_ready.clear()
             file_name = None
-
             while selected_video is None:
                 time.sleep(0.3)
-
             current_video = selected_video
             toast(f"Processing: {os.path.basename(current_video)}")
-
             try:
                 compressed          = compress_video(current_video)
                 file_uri, file_name = upload_video(api_key, compressed)
                 wait_for_processing(api_key, file_name)
                 result              = generate_caption(api_key, file_uri)
                 result              = format_result(result)
-
                 copy_to_clipboard(result)
                 caption_ready.set()
                 notify("Caption Ready!", "Copied to clipboard. Open NewsBreak and paste.")
                 toast("Copied! Tap next video when ready.")
-
                 print("\n" + "=" * 50)
                 print(result)
                 print("=" * 50)
-
             except Exception as e:
                 caption_ready.set()
                 notify("Error", str(e))
@@ -494,7 +489,6 @@ def main():
                 if file_name and api_key:
                     delete_file(api_key, file_name)
                 cleanup()
-
     except FileNotFoundError:
         notify("Error", "Gemini API key not found. Check ~/.config/gemini_key.txt")
         sys.exit(1)
@@ -502,7 +496,6 @@ def main():
         notify("Error", str(e))
         toast(f"Error: {str(e)[:60]}")
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()
