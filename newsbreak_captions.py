@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 NewsBreak Caption & Hashtag Generator
-- Tap widget → browser opens with video thumbnail grid
+- Browser opens with video thumbnail grid
 - Tap a thumbnail → script processes that video
 - Caption + hashtags copied to clipboard
 """
@@ -150,7 +150,14 @@ def build_html(videos):
         b64      = get_thumb_b64(vpath)
         img_src  = f"data:image/jpeg;base64,{b64}" if b64 else ""
         size_mb  = os.path.getsize(vpath) / (1024 * 1024)
-        img_tag  = f"<img src='{img_src}' loading='lazy'>" if img_src else "<div class='no-thumb'>&#9654;</div>"
+        vid_name = os.path.basename(vpath)
+        
+        if img_src:
+            img_tag = f"<img src='{img_src}' loading='lazy'>"
+        else:
+            # Show video name if no thumbnail
+            img_tag = f"<div class='no-thumb'><div class='vid-name'>{vid_name[:20]}</div></div>"
+        
         cards   += f"""
         <div class="card" onclick="pick({i})">
             {img_tag}
@@ -171,7 +178,8 @@ def build_html(videos):
   .card {{ position: relative; aspect-ratio: 9/16; background: #1a1a1a; cursor: pointer; overflow: hidden; border-radius: 4px; transition: transform 0.1s, opacity 0.1s; -webkit-tap-highlight-color: transparent; }}
   .card:active {{ transform: scale(0.95); opacity: 0.8; }}
   .card img {{ width: 100%; height: 100%; object-fit: cover; display: block; }}
-  .no-thumb {{ width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: #333; font-size: 24px; }}
+  .no-thumb {{ width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; color: #666; font-size: 11px; padding: 8px; text-align: center; word-break: break-all; }}
+  .vid-name {{ font-family: monospace; }}
   .label {{ position: absolute; bottom: 0; left: 0; right: 0; background: linear-gradient(transparent, rgba(0,0,0,0.8)); color: #ccc; font-size: 10px; padding: 12px 6px 5px; text-align: right; }}
   .overlay {{ display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.85); z-index: 100; align-items: center; justify-content: center; flex-direction: column; gap: 12px; }}
   .overlay.show {{ display: flex; }}
@@ -347,7 +355,7 @@ def generate_caption(api_key, file_uri):
     url   = f"{GEMINI_BASE}/v1beta/models/{MODEL}:generateContent?key={api_key}"
     style = random.choice([
         {
-            "length":    "exactly 1 sentence, between 30 and 70characters",
+            "length":    "exactly 1 sentence, between 30 and 70 characters",
             "structure": "One punchy hook that stands alone. Caption needed. No CTA needed."
         },
         {
@@ -447,21 +455,30 @@ def main():
         server_thread.start()
         url = f"http://127.0.0.1:{PORT}"
         time.sleep(2)
+        
+        # Auto-open browser immediately
+        toast("Opening video picker...")
+        try:
+            subprocess.run(["termux-open-url", url], timeout=3, capture_output=True)
+        except Exception:
+            pass
+        
+        time.sleep(1)
+        
+        # Create notification for reference
         try:
             subprocess.run([
                 "termux-notification",
                 "--title",          "NewsBreak Caption",
-                "--content",        "Tap to open video picker",
-                "--action",         f"termux-open-url {url}",
-                "--button1",        "Open Picker",
+                "--content",        "Video picker is open. Tap to reopen if closed.",
+                "--button1",        "Reopen Picker",
                 "--button1-action", f"termux-open-url {url}",
                 "--id",             "nb_picker",
                 "--ongoing"
-            ], timeout=5)
-        except subprocess.TimeoutExpired:
+            ], timeout=5, capture_output=True)
+        except Exception:
             pass
         
-        toast("Tap notification to open picker")
         # Process videos one by one indefinitely
         while True:
             selected_video = None
