@@ -16,6 +16,7 @@ import socket
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
+
 # ── Config ──────────────────────────────────────────────
 KEY_FILE        = os.path.expanduser("~/.config/gemini_key.txt")
 MODEL           = "gemini-2.5-flash"
@@ -24,9 +25,11 @@ THUMB_DIR       = "/sdcard/Pictures/scoopz/.thumbs"
 TEMP_COMPRESSED = "/sdcard/Download/nb_caption_compressed.mp4"
 GEMINI_BASE     = "https://generativelanguage.googleapis.com"
 PORT            = 8765
+
 # ────────────────────────────────────────────────────────
 selected_video = None
 caption_ready  = threading.Event()
+
 # ── Utilities ─────────────────────────────────────────────
 def notify(title, msg):
     """Notification with timeout to prevent hanging."""
@@ -344,12 +347,12 @@ def generate_caption(api_key, file_uri):
     url   = f"{GEMINI_BASE}/v1beta/models/{MODEL}:generateContent?key={api_key}"
     style = random.choice([
         {
-            "length":    "exactly 1 sentence, between 50 and 80 characters",
-            "structure": "One punchy hook that stands alone. No CTA needed."
+            "length":    "exactly 1 sentence, between 30 and 70characters",
+            "structure": "One punchy hook that stands alone. Caption needed. No CTA needed."
         },
         {
-            "length":    "2 sentences, between 80 and 120 characters",
-            "structure": "Sentence 1: strong hook. Sentence 2: a call to action (e.g. 'Follow for more!', 'Share this!', 'Tag someone!')."
+            "length":    "2 sentences, between 50 and 100 characters",
+            "structure": "Sentence 1: strong hook. Sentence 2: a call to action (e.g. 'Follow for more!', 'Share this!', 'Tag someone!').Caption Needed"
         },
     ])
     prompt = (

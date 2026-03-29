@@ -5,7 +5,6 @@
 #  HOW TO INSTALL (run once):
 #    echo "source ~/scoopz/scoopz_env.sh" >> ~/.bashrc && source ~/.bashrc
 # ══════════════════════════════════════════════════════
-
 export SCOOPZ_DIR="$HOME/scoopz"
 export SCOOPZ_SHARED="$HOME/storage/shared/scoopz_downloads"
 
@@ -22,19 +21,61 @@ upload() {
         echo "⚠️  No device found. Connect phone via USB then try again."
         return 1
     fi
-
     local count
     count=$(ls "$SCOOPZ_DIR/downloads/"*.mp4 2>/dev/null | wc -l)
     if [ "$count" -eq 0 ]; then
         echo "⚠️  Nothing to upload. Run 'collect' while browsing TikTok first."
         return 1
     fi
-
     echo "📦 $count MP4(s) ready — starting uploader"
     cd "$SCOOPZ_DIR" && python uploader.py
 }
 
-# ── Captions ─────────────────────────────────────────────────────────────────
+# ── NewsBreak Caption Generator ──────────────────────────────────────────────
+nb-caption() {
+    echo "🎬 Starting NewsBreak caption generator..."
+    cd "$SCOOPZ_DIR" || return 1
+    
+    # Check if script exists
+    if [ ! -f "newsbreak_caption.py" ]; then
+        echo "⚠️  newsbreak_caption.py not found in $SCOOPZ_DIR"
+        return 1
+    fi
+    
+    # Run the caption generator
+    python newsbreak_caption.py
+}
+
+nb-caption-bg() {
+    echo "🎬 Starting NewsBreak caption generator in background..."
+    cd "$SCOOPZ_DIR" || return 1
+    
+    if [ ! -f "newsbreak_caption.py" ]; then
+        echo "⚠️  newsbreak_caption.py not found in $SCOOPZ_DIR"
+        return 1
+    fi
+    
+    # Create logs directory if it doesn't exist
+    mkdir -p logs
+    
+    # Run in background, keep process alive
+    nohup python newsbreak_caption.py > logs/nb_caption.log 2>&1 &
+    local pid=$!
+    echo "✅ Caption generator running (PID: $pid)"
+    echo "   Tap the notification to open video picker"
+    echo "   Stop with: nb-caption-stop or kill $pid"
+}
+
+nb-caption-stop() {
+    pkill -f "newsbreak_caption.py"
+    echo "🛑 Stopped NewsBreak caption generator"
+}
+
+nb-caption-logs() {
+    tail -f "$SCOOPZ_DIR/logs/nb_caption.log"
+}
+
+# ── Captions (Legacy) ────────────────────────────────────────────────────────
 next-caption() {
     cd "$SCOOPZ_DIR" || return 1
     local txt
@@ -44,10 +85,8 @@ next-caption() {
         command -v termux-toast >/dev/null 2>&1 && termux-toast "No captions ready"
         return 1
     fi
-
     local caption
     caption=$(cat "$txt")
-
     if command -v termux-clipboard-set >/dev/null 2>&1; then
         printf "%s" "$caption" | termux-clipboard-set
         if command -v termux-toast >/dev/null 2>&1; then
@@ -63,7 +102,6 @@ next-caption() {
         printf "%s\n" "$caption"
         echo "----------------------------------------"
     fi
-
     mkdir -p downloads/done
     local base
     base=${txt%.txt}
@@ -97,13 +135,11 @@ EOF
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 scoopz-clean() {
     cd "$SCOOPZ_DIR" || return 1
-
     local keep="${1:-0}"
     if ! [[ "$keep" =~ ^[0-9]+$ ]]; then
         echo "Usage: scoopz-clean [keep_recent_count]"
         return 1
     fi
-
     local -a mp4s=()
     if command -v python3 >/dev/null 2>&1; then
         mapfile -t mp4s < <(python3 - <<'PY'
@@ -117,7 +153,6 @@ PY
     else
         mapfile -t mp4s < <(ls -1t downloads/*.mp4 2>/dev/null || true)
     fi
-
     if [ ${#mp4s[@]} -eq 0 ]; then
         echo "Nothing to clean inside downloads/"
     else
@@ -132,14 +167,12 @@ PY
         done
         echo "🧹 Removed $removed old video(s) from downloads/ (kept $keep)."
     fi
-
     if [ -d downloads/done ]; then
         local done_count
         done_count=$(find downloads/done -type f 2>/dev/null | wc -l)
         rm -f downloads/done/* 2>/dev/null
         echo "🗑 Cleared downloads/done/ ($done_count file(s))."
     fi
-
     if [ -d "$SCOOPZ_SHARED" ]; then
         local shared_count
         shared_count=$(find "$SCOOPZ_SHARED" -maxdepth 1 -type f 2>/dev/null | wc -l)
@@ -151,7 +184,6 @@ PY
     else
         echo "ℹ️  Shared folder not found: $SCOOPZ_SHARED"
     fi
-
 }
 
 # ── Logs ──────────────────────────────────────────────────────────────────────
@@ -164,10 +196,8 @@ scoopz-status() {
     echo "══════════════════════════════════════"
     echo "       Scoopz Workflow Status"
     echo "══════════════════════════════════════"
-
     echo "── ADB Devices ────────────────────────"
     adb devices -l
-
     echo ""
     echo "── Downloads ──────────────────────────"
     local total uploaded_count pending
@@ -182,7 +212,6 @@ scoopz-status() {
     echo "   Total MP4s : $total"
     echo "   Uploaded   : $uploaded_count"
     echo "   Pending    : $pending"
-
     echo ""
     echo "── URL Queue ──────────────────────────"
     if [ -f "$SCOOPZ_DIR/data/queue.json" ]; then
@@ -194,35 +223,61 @@ scoopz-status() {
     else
         echo "   queue.json not found yet"
     fi
-
+    echo ""
+    echo "── Caption Generator ──────────────────"
+    if pgrep -f "newsbreak_caption.py" > /dev/null; then
+        local pid
+        pid=$(pgrep -f "newsbreak_caption.py")
+        echo "   Status: ✅ Running (PID: $pid)"
+    else
+        echo "   Status: ⚪ Not running"
+    fi
     echo ""
     echo "── Last 3 collector log lines ─────────"
     tail -3 "$SCOOPZ_DIR/logs/collector.log" 2>/dev/null || echo "   (no log yet)"
-
     echo ""
     echo "── Last 3 uploader log lines ──────────"
     tail -3 "$SCOOPZ_DIR/logs/uploader.log" 2>/dev/null || echo "   (no log yet)"
-
+    echo ""
+    echo "── Last 3 caption log lines ───────────"
+    tail -3 "$SCOOPZ_DIR/logs/nb_caption.log" 2>/dev/null || echo "   (no log yet)"
     echo "══════════════════════════════════════"
 }
 
 # ── Help ──────────────────────────────────────────────────────────────────────
 scoopz-help() {
     echo ""
+    echo "  ── Collection & Upload ──────────────────────"
     echo "  collect              Clipboard monitor + TikTok downloader"
     echo "  upload               Post queued videos to Newsbreak"
+    echo ""
+    echo "  ── NewsBreak Captions ───────────────────────"
+    echo "  nb-caption           Start caption generator (interactive)"
+    echo "  nb-caption-bg        Start in background, tap notification"
+    echo "  nb-caption-stop      Stop background caption generator"
+    echo "  nb-caption-logs      View caption generator logs"
+    echo ""
+    echo "  ── Legacy Captions ──────────────────────────"
     echo "  next-caption         Copy the next caption + archive files"
     echo "  install-next-caption-widget  Generate Termux widget script"
-    echo "  scoopz-clean [keep]   Remove old local/shared downloads"
+    echo ""
+    echo "  ── Maintenance ──────────────────────────────"
+    echo "  scoopz-clean [keep]  Remove old local/shared downloads"
     echo "  scoopz-status        Devices · queue · pending · logs"
     echo "  logs-collect         Live tail collector log"
     echo "  logs-upload          Live tail uploader log"
     echo ""
-    echo "  Session:"
+    echo "  ── Typical Collection Session ───────────────"
     echo "  1. collect           ← keep running, browse TikTok"
     echo "  2. scoopz-status     ← check how many are ready"
     echo "  3. plug in USB       ← connect phone to laptop/charger with ADB"
     echo "  4. upload            ← posts up to 40 videos automatically"
+    echo ""
+    echo "  ── Caption Workflow ─────────────────────────"
+    echo "  1. nb-caption-bg     ← start caption generator"
+    echo "  2. tap notification  ← open video picker in browser"
+    echo "  3. tap thumbnails    ← get captions, paste in NewsBreak"
+    echo "  4. nb-caption-stop   ← when done"
     echo ""
 }
 
