@@ -29,6 +29,7 @@ PORT            = 8765
 # ────────────────────────────────────────────────────────
 selected_video = None
 caption_ready  = threading.Event()
+processing_lock = threading.Lock()  # Prevent race conditions
 
 # ── Utilities ─────────────────────────────────────────────
 def notify(title, msg):
@@ -54,10 +55,30 @@ def toast(msg):
         pass
 
 def copy_to_clipboard(text):
-    try:
-        subprocess.run(["termux-clipboard-set"], input=text.encode(), timeout=3)
-    except (subprocess.TimeoutExpired, Exception):
-        pass
+    """Copy text to clipboard with retry logic."""
+    for attempt in range(3):
+        try:
+            result = subprocess.run(
+                ["termux-clipboard-set"], 
+                input=text.encode(), 
+                timeout=3,
+                capture_output=True
+            )
+            if result.returncode == 0:
+                # Verify it was copied
+                time.sleep(0.2)
+                verify = subprocess.run(
+                    ["termux-clipboard-get"],
+                    timeout=2,
+                    capture_output=True
+                )
+                if text.strip() in verify.stdout.decode().strip():
+                    return True
+        except (subprocess.TimeoutExpired, Exception) as e:
+            if attempt < 2:
+                time.sleep(0.5)
+                continue
+    return False
 
 def load_api_key():
     with open(KEY_FILE, "r") as f:
@@ -123,9 +144,8 @@ def generate_thumbnails(videos):
                     "-vframes", "1", "-q:v", "3",
                     "-vf", "scale=320:-1",
                     thumb_path
-                ], capture_output=True, timeout=10)  # 10 sec timeout per video
+                ], capture_output=True, timeout=10)
             except (subprocess.TimeoutExpired, Exception) as e:
-                # Skip problematic videos, continue with others
                 print(f"⚠ Skipped {vid_name}: {str(e)[:50]}")
                 skipped += 1
                 continue
@@ -155,7 +175,6 @@ def build_html(videos):
         if img_src:
             img_tag = f"<img src='{img_src}' loading='lazy'>"
         else:
-            # Show video name if no thumbnail
             img_tag = f"<div class='no-thumb'><div class='vid-name'>{vid_name[:20]}</div></div>"
         
         cards   += f"""
@@ -251,9 +270,12 @@ class Handler(BaseHTTPRequestHandler):
         elif parsed.path == "/pick":
             params = parse_qs(parsed.query)
             idx    = int(params.get("i", [0])[0])
-            caption_ready.clear()
-            time.sleep(0.1)
-            selected_video = self.videos[idx]
+            
+            # Use lock to prevent race conditions
+            with processing_lock:
+                caption_ready.clear()
+                selected_video = self.videos[idx]
+            
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
@@ -335,6 +357,7 @@ def upload_video(api_key, video_path):
         upload_resp.raise_for_status()
         break
     file_info = upload_resp.json()
+    toast("Upload complete!")
     return file_info["file"]["uri"], file_info["file"]["name"]
 
 def wait_for_processing(api_key, file_name):
@@ -345,6 +368,7 @@ def wait_for_processing(api_key, file_name):
         resp.raise_for_status()
         state = resp.json().get("state", "")
         if state == "ACTIVE":
+            toast("Analysis complete!")
             return
         if state == "FAILED":
             raise ValueError("Gemini failed to process the video.")
@@ -352,6 +376,7 @@ def wait_for_processing(api_key, file_name):
     raise TimeoutError("Gemini took too long.")
 
 def generate_caption(api_key, file_uri):
+    toast("Generating caption...")
     url   = f"{GEMINI_BASE}/v1beta/models/{MODEL}:generateContent?key={api_key}"
     style = random.choice([
         {
@@ -481,34 +506,71 @@ def main():
         
         # Process videos one by one indefinitely
         while True:
-            selected_video = None
-            caption_ready.clear()
-            file_name = None
+            # Wait for video selection with lock
+            with processing_lock:
+                selected_video = None
+                caption_ready.clear()
+                file_name = None
+            
+            # Wait for user to select a video
             while selected_video is None:
                 time.sleep(0.3)
-            current_video = selected_video
+            
+            # Lock during processing to prevent race conditions
+            with processing_lock:
+                current_video = selected_video
+            
             toast(f"Processing: {os.path.basename(current_video)}")
+            print(f"\n🎬 Processing: {os.path.basename(current_video)}")
+            
             try:
-                compressed          = compress_video(current_video)
+                # Step 1: Compress
+                compressed = compress_video(current_video)
+                
+                # Step 2: Upload
                 file_uri, file_name = upload_video(api_key, compressed)
+                
+                # Step 3: Wait for processing
                 wait_for_processing(api_key, file_name)
-                result              = generate_caption(api_key, file_uri)
-                result              = format_result(result)
-                copy_to_clipboard(result)
-                caption_ready.set()
-                notify("Caption Ready!", "Copied to clipboard. Open NewsBreak and paste.")
-                toast("Copied! Tap next video when ready.")
+                
+                # Step 4: Generate caption
+                result = generate_caption(api_key, file_uri)
+                result = format_result(result)
+                
+                # Step 5: Copy to clipboard with verification
+                toast("Copying to clipboard...")
+                copy_success = copy_to_clipboard(result)
+                
+                if copy_success:
+                    toast("✅ Copied to clipboard!")
+                    notify("Caption Ready!", "Caption copied! Open NewsBreak and paste.")
+                else:
+                    toast("⚠️ Clipboard failed - see terminal")
+                    notify("Caption Ready", "Check terminal for caption")
+                
+                # Always print to terminal as backup
                 print("\n" + "=" * 50)
                 print(result)
                 print("=" * 50)
-            except Exception as e:
+                
+                # Signal UI that we're done
                 caption_ready.set()
-                notify("Error", str(e))
-                toast(f"Error: {str(e)[:60]}")
+                
+                toast("Tap next video when ready.")
+                
+            except Exception as e:
+                error_msg = str(e)[:60]
+                print(f"\n❌ Error: {error_msg}")
+                toast(f"Error: {error_msg}")
+                notify("Error", error_msg)
+                caption_ready.set()
+                
             finally:
+                # Cleanup
                 if file_name and api_key:
                     delete_file(api_key, file_name)
                 cleanup()
+                
     except FileNotFoundError:
         notify("Error", "Gemini API key not found. Check ~/.config/gemini_key.txt")
         sys.exit(1)
