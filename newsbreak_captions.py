@@ -29,7 +29,8 @@ PORT            = 8765
 # ────────────────────────────────────────────────────────
 selected_video = None
 caption_ready  = threading.Event()
-processing_lock = threading.Lock()  # Prevent race conditions
+processing_lock = threading.Lock()
+server_url = None  # Store URL globally for reopening
 
 # ── Utilities ─────────────────────────────────────────────
 def notify(title, msg):
@@ -54,30 +55,77 @@ def toast(msg):
     except (subprocess.TimeoutExpired, Exception):
         pass
 
-def copy_to_clipboard(text):
-    """Copy text to clipboard with retry logic."""
+def open_browser(url):
+    """Open browser with retry logic."""
     for attempt in range(3):
         try:
+            result = subprocess.run(
+                ["termux-open-url", url],
+                timeout=5,
+                capture_output=True
+            )
+            if result.returncode == 0:
+                return True
+            time.sleep(0.5)
+        except (subprocess.TimeoutExpired, Exception):
+            if attempt < 2:
+                time.sleep(1)
+                continue
+    return False
+
+def copy_to_clipboard(text):
+    """Copy text to clipboard with retry and verbose feedback."""
+    print(f"\n📋 Attempting to copy to clipboard...")
+    
+    for attempt in range(5):  # Increased from 3 to 5 attempts
+        try:
+            # Clear clipboard first
+            subprocess.run(
+                ["termux-clipboard-set"],
+                input="".encode(),
+                timeout=2,
+                capture_output=True
+            )
+            time.sleep(0.3)
+            
+            # Set clipboard
             result = subprocess.run(
                 ["termux-clipboard-set"], 
                 input=text.encode(), 
                 timeout=3,
                 capture_output=True
             )
-            if result.returncode == 0:
-                # Verify it was copied
-                time.sleep(0.2)
-                verify = subprocess.run(
-                    ["termux-clipboard-get"],
-                    timeout=2,
-                    capture_output=True
-                )
-                if text.strip() in verify.stdout.decode().strip():
-                    return True
-        except (subprocess.TimeoutExpired, Exception) as e:
-            if attempt < 2:
+            
+            if result.returncode != 0:
+                print(f"   Attempt {attempt + 1}: Set failed (returncode {result.returncode})")
                 time.sleep(0.5)
                 continue
+            
+            # Verify it was copied
+            time.sleep(0.5)
+            verify = subprocess.run(
+                ["termux-clipboard-get"],
+                timeout=3,
+                capture_output=True
+            )
+            
+            clipboard_content = verify.stdout.decode().strip()
+            
+            if text.strip() == clipboard_content:
+                print(f"   ✅ Clipboard verified on attempt {attempt + 1}")
+                return True
+            else:
+                print(f"   Attempt {attempt + 1}: Verification failed")
+                print(f"      Expected length: {len(text.strip())}")
+                print(f"      Got length: {len(clipboard_content)}")
+                
+        except (subprocess.TimeoutExpired, Exception) as e:
+            print(f"   Attempt {attempt + 1}: Exception - {str(e)[:50]}")
+            
+        if attempt < 4:
+            time.sleep(1)
+    
+    print(f"   ❌ All clipboard attempts failed")
     return False
 
 def load_api_key():
@@ -87,13 +135,12 @@ def load_api_key():
 def kill_port(port):
     """Kill any process occupying the given port."""
     import glob
-    # Check if port is already free
     try:
         test = socket.socket()
         test.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         test.bind(("127.0.0.1", port))
         test.close()
-        return  # already free
+        return
     except OSError:
         pass
     port_hex = format(port, "04X")
@@ -130,7 +177,6 @@ def generate_thumbnails(videos):
     skipped = 0
     
     for idx, video_path in enumerate(videos):
-        # Show progress every 5 videos
         if idx % 5 == 0 or idx == 0:
             toast(f"Loading thumbnails... {idx}/{total}")
         
@@ -232,12 +278,21 @@ def build_html(videos):
           document.getElementById('spinner').style.display = 'block';
           document.getElementById('status').textContent = 'Processing video\u2026';
         }}, 2000);
+      }} else if (result === 'error') {{
+        document.getElementById('spinner').style.display = 'none';
+        document.getElementById('status').textContent = '❌ Failed. Refreshing...';
+        setTimeout(() => {{
+          location.reload();
+        }}, 2000);
       }} else {{
         document.getElementById('status').textContent = 'Timed out. Try again.';
         setTimeout(() => document.getElementById('overlay').classList.remove('show'), 2000);
       }}
     }}).catch(() => {{
-      document.getElementById('status').textContent = 'Something went wrong.';
+      document.getElementById('status').textContent = 'Connection error. Refreshing...';
+      setTimeout(() => {{
+        location.reload();
+      }}, 2000);
     }});
   }}
 </script>
@@ -256,8 +311,11 @@ class ReusableServer(HTTPServer):
 
 class Handler(BaseHTTPRequestHandler):
     videos = []
+    error_occurred = False
+    
     def log_message(self, format, *args):
         pass
+    
     def do_GET(self):
         global selected_video, caption_ready
         parsed = urlparse(self.path)
@@ -271,9 +329,9 @@ class Handler(BaseHTTPRequestHandler):
             params = parse_qs(parsed.query)
             idx    = int(params.get("i", [0])[0])
             
-            # Use lock to prevent race conditions
             with processing_lock:
                 caption_ready.clear()
+                Handler.error_occurred = False
                 selected_video = self.videos[idx]
             
             self.send_response(200)
@@ -285,7 +343,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
-            self.wfile.write(b"done" if ready else b"timeout")
+            
+            if Handler.error_occurred:
+                self.wfile.write(b"error")
+            elif ready:
+                self.wfile.write(b"done")
+            else:
+                self.wfile.write(b"timeout")
         else:
             self.send_response(404)
             self.end_headers()
@@ -449,12 +513,11 @@ def format_result(result):
         if len(combined) > 150:
             combined = combined[:150].rsplit(" ", 1)[0]
         return combined.strip()
-    # Fallback
     return result[:150].rsplit(" ", 1)[0] if len(result) > 150 else result
 
 # ── Main ──────────────────────────────────────────────────
 def main():
-    global selected_video
+    global selected_video, server_url
     file_name = None
     api_key   = None
     try:
@@ -478,26 +541,27 @@ def main():
         server_thread        = threading.Thread(target=server.serve_forever)
         server_thread.daemon = True
         server_thread.start()
-        url = f"http://127.0.0.1:{PORT}"
+        server_url = f"http://127.0.0.1:{PORT}"
         time.sleep(2)
         
-        # Auto-open browser immediately
+        # Auto-open browser with retry
         toast("Opening video picker...")
-        try:
-            subprocess.run(["termux-open-url", url], timeout=3, capture_output=True)
-        except Exception:
-            pass
+        browser_opened = open_browser(server_url)
+        
+        if not browser_opened:
+            print("⚠️  Failed to auto-open browser")
+            toast("Failed to open browser - check notification")
         
         time.sleep(1)
         
-        # Create notification for reference
+        # Create notification
         try:
             subprocess.run([
                 "termux-notification",
                 "--title",          "NewsBreak Caption",
-                "--content",        "Video picker is open. Tap to reopen if closed.",
-                "--button1",        "Reopen Picker",
-                "--button1-action", f"termux-open-url {url}",
+                "--content",        "Video picker ready. Tap to open.",
+                "--button1",        "Open Picker",
+                "--button1-action", f"termux-open-url {server_url}",
                 "--id",             "nb_picker",
                 "--ongoing"
             ], timeout=5, capture_output=True)
@@ -506,17 +570,15 @@ def main():
         
         # Process videos one by one indefinitely
         while True:
-            # Wait for video selection with lock
             with processing_lock:
                 selected_video = None
                 caption_ready.clear()
                 file_name = None
+                Handler.error_occurred = False
             
-            # Wait for user to select a video
             while selected_video is None:
                 time.sleep(0.3)
             
-            # Lock during processing to prevent race conditions
             with processing_lock:
                 current_video = selected_video
             
@@ -524,49 +586,44 @@ def main():
             print(f"\n🎬 Processing: {os.path.basename(current_video)}")
             
             try:
-                # Step 1: Compress
                 compressed = compress_video(current_video)
-                
-                # Step 2: Upload
                 file_uri, file_name = upload_video(api_key, compressed)
-                
-                # Step 3: Wait for processing
                 wait_for_processing(api_key, file_name)
-                
-                # Step 4: Generate caption
                 result = generate_caption(api_key, file_uri)
                 result = format_result(result)
                 
-                # Step 5: Copy to clipboard with verification
-                toast("Copying to clipboard...")
+                # Copy to clipboard with detailed feedback
                 copy_success = copy_to_clipboard(result)
+                
+                # Always print to terminal
+                print("\n" + "=" * 50)
+                print(result)
+                print("=" * 50 + "\n")
                 
                 if copy_success:
                     toast("✅ Copied to clipboard!")
-                    notify("Caption Ready!", "Caption copied! Open NewsBreak and paste.")
+                    notify("Caption Ready!", "Pasted to clipboard. Open NewsBreak.")
                 else:
-                    toast("⚠️ Clipboard failed - see terminal")
-                    notify("Caption Ready", "Check terminal for caption")
+                    toast("⚠️ Clipboard failed - caption printed to terminal")
+                    notify("Caption Ready", "Clipboard failed - check terminal")
                 
-                # Always print to terminal as backup
-                print("\n" + "=" * 50)
-                print(result)
-                print("=" * 50)
-                
-                # Signal UI that we're done
                 caption_ready.set()
-                
                 toast("Tap next video when ready.")
                 
             except Exception as e:
                 error_msg = str(e)[:60]
                 print(f"\n❌ Error: {error_msg}")
-                toast(f"Error: {error_msg}")
-                notify("Error", error_msg)
+                toast(f"Error - refreshing picker...")
+                notify("Error", "Something went wrong. Try again.")
+                
+                Handler.error_occurred = True
                 caption_ready.set()
                 
+                # Reopen browser on error
+                time.sleep(2)
+                open_browser(server_url)
+                
             finally:
-                # Cleanup
                 if file_name and api_key:
                     delete_file(api_key, file_name)
                 cleanup()
