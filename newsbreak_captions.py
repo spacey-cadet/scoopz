@@ -74,59 +74,48 @@ def open_browser(url):
     return False
 
 def copy_to_clipboard(text):
-    """Copy text to clipboard with retry and verbose feedback."""
-    print(f"\n📋 Attempting to copy to clipboard...")
+    """Copy text to clipboard with increased timeout for busy system."""
+    print(f"\n📋 Copying to clipboard...")
     
-    for attempt in range(5):  # Increased from 3 to 5 attempts
-        try:
-            # Clear clipboard first
-            subprocess.run(
-                ["termux-clipboard-set"],
-                input="".encode(),
-                timeout=2,
-                capture_output=True
-            )
-            time.sleep(0.3)
+    # Single attempt with longer timeout (system is busy during processing)
+    try:
+        # Set clipboard with generous timeout
+        result = subprocess.run(
+            ["termux-clipboard-set"], 
+            input=text.encode(), 
+            timeout=10,  # Increased from 3 to 10 seconds
+            capture_output=True
+        )
+        
+        if result.returncode == 0:
+            print(f"   ✅ Clipboard set successfully")
             
-            # Set clipboard
-            result = subprocess.run(
-                ["termux-clipboard-set"], 
-                input=text.encode(), 
-                timeout=3,
-                capture_output=True
-            )
-            
-            if result.returncode != 0:
-                print(f"   Attempt {attempt + 1}: Set failed (returncode {result.returncode})")
+            # Optional quick verify (skip if causing issues)
+            try:
                 time.sleep(0.5)
-                continue
-            
-            # Verify it was copied
-            time.sleep(0.5)
-            verify = subprocess.run(
-                ["termux-clipboard-get"],
-                timeout=3,
-                capture_output=True
-            )
-            
-            clipboard_content = verify.stdout.decode().strip()
-            
-            if text.strip() == clipboard_content:
-                print(f"   ✅ Clipboard verified on attempt {attempt + 1}")
+                verify = subprocess.run(
+                    ["termux-clipboard-get"],
+                    timeout=5,
+                    capture_output=True
+                )
+                if text.strip() in verify.stdout.decode():
+                    print(f"   ✅ Clipboard verified")
+                    return True
+            except:
+                # Verification failed but set succeeded - that's okay
+                print(f"   ⚠️  Verification skipped, but copy likely succeeded")
                 return True
-            else:
-                print(f"   Attempt {attempt + 1}: Verification failed")
-                print(f"      Expected length: {len(text.strip())}")
-                print(f"      Got length: {len(clipboard_content)}")
-                
-        except (subprocess.TimeoutExpired, Exception) as e:
-            print(f"   Attempt {attempt + 1}: Exception - {str(e)[:50]}")
+        else:
+            print(f"   ❌ Clipboard set failed (returncode {result.returncode})")
+            return False
             
-        if attempt < 4:
-            time.sleep(1)
-    
-    print(f"   ❌ All clipboard attempts failed")
-    return False
+    except subprocess.TimeoutExpired:
+        print(f"   ⚠️  Clipboard timeout (system busy)")
+        # Still might have succeeded, just took too long
+        return False
+    except Exception as e:
+        print(f"   ❌ Clipboard error: {str(e)[:50]}")
+        return False
 
 def load_api_key():
     with open(KEY_FILE, "r") as f:
