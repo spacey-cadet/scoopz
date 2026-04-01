@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import requests
 from pathlib import Path
 
@@ -26,6 +27,10 @@ class ScoopzHybrid:
     def __init__(self):
         self.queue = asyncio.Queue()
         self.session = requests.Session()
+        # Disguise the script slightly to prevent API blocking
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        })
         self.done = 0
         self.failed = 0
         self.active = 0
@@ -33,12 +38,10 @@ class ScoopzHybrid:
     
     def update_ui(self):
         queued = self.queue.qsize()
-        # Clear line and update in place
         sys.stdout.write(f"\r\033[K ⬇️  Active: {self.active} | ✅ Done: {self.done} | ❌ Fail: {self.failed} | 🕒 Queued: {queued}")
         sys.stdout.flush()
     
     def send_notification(self, title, msg):
-        """Sends a native Android notification."""
         subprocess.run([
             "termux-notification", 
             "-t", title, 
@@ -60,14 +63,39 @@ class ScoopzHybrid:
                     if raw_content:
                         found_urls = [l.strip() for l in raw_content.splitlines() if TIKTOK_RE.search(l)]
                         if found_urls:
-                            INBOX_PATH.write_text("")
+                            INBOX_PATH.write_text("") # Clear inbox immediately
                             for url in found_urls:
                                 await self.queue.put(url)
                             self.update_ui()
                 except Exception:
                     pass
             await asyncio.sleep(POLL_RATE)
-    
+
+    def _sync_download(self, play_url, final_path):
+        """Runs blocking requests operations safely in a thread"""
+        temp_path = final_path.with_suffix('.mp4.part')
+        
+        # Retry loop for the actual video file
+        for attempt in range(3):
+            try:
+                with self.session.get(play_url, stream=True, timeout=30) as r:
+                    r.raise_for_status()
+                    with open(temp_path, "wb") as f:
+                        shutil.copyfileobj(r.raw, f)
+                
+                # Success! Rename to final mp4
+                temp_path.rename(final_path)
+                return True
+                
+            except Exception:
+                # Clean up corrupted partial file if it failed
+                if temp_path.exists():
+                    temp_path.unlink()
+                
+                if attempt < 2:
+                    time.sleep(2) # Wait before retry
+        return False
+
     async def download_worker(self):
         while True:
             url = await self.queue.get()
@@ -76,40 +104,55 @@ class ScoopzHybrid:
             
             try:
                 data = None
+                # API Retry Loop
                 for attempt in range(3):
                     try:
+                        # TikWM sometimes prefers POST data over GET params
                         resp = await asyncio.to_thread(
-                            self.session.get, 
+                            self.session.post, 
                             TIKWM_API, 
-                            params={"url": url, "hd": "1"}, 
-                            timeout=12
+                            data={"url": url, "hd": 1}, 
+                            timeout=15
                         )
                         data = resp.json()
                         if data.get("code") == 0:
                             break
                         if data.get("code") == -1:
                             await asyncio.sleep(2)
-                    except:
-                        await asyncio.sleep(1)
+                    except Exception:
+                        await asyncio.sleep(2)
                 
                 if not data or data.get("code") != 0:
                     self.failed += 1
+                    continue
+                
+                clip = data.get("data", {})
+                video_id = clip.get("id", "unknown")
+                
+                # Check history early to save bandwidth
+                if video_id in self.history:
+                    self.done += 1
+                    continue
+                
+                # Prioritize HD, fallback to standard, fail gracefully if it's a photo post
+                play_url = clip.get("hdplay") or clip.get("play")
+                if not play_url:
+                    self.failed += 1 # Likely an image carousel, not a video
+                    continue
+                
+                final_path = EXPORT_DIR / f"{video_id}.mp4"
+                
+                # Offload the heavy file downloading to a background thread
+                success = await asyncio.to_thread(self._sync_download, play_url, final_path)
+                
+                if success:
+                    subprocess.run(["termux-media-scan", str(final_path)], capture_output=True)
+                    self.add_to_history(video_id)
+                    self.done += 1
+                    self.send_notification("Scoopz Downloaded", f"Saved {video_id} to Gallery")
                 else:
-                    clip = data["data"]
-                    video_id = clip.get("id", "unknown")
-                    
-                    if video_id in self.history:
-                        self.done += 1
-                    else:
-                        final_path = EXPORT_DIR / f"{video_id}.mp4"
-                        with self.session.get(clip["play"], stream=True) as r:
-                            with open(final_path, "wb") as f:
-                                shutil.copyfileobj(r.raw, f)
-                        
-                        subprocess.run(["termux-media-scan", str(final_path)], capture_output=True)
-                        self.add_to_history(video_id)
-                        self.done += 1
-                        self.send_notification("Scoopz Downloaded", f"Saved {video_id} to Gallery")
+                    self.failed += 1
+
             except Exception:
                 self.failed += 1
             finally:
