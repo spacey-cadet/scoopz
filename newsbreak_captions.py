@@ -85,9 +85,7 @@ def toast(msg):
         pass
 
 def open_browser(url):
-    """Try multiple launch methods."""
     print(f"\n>>> Open in browser: {url}\n")
-
     for pkg in ["com.android.chrome", "org.mozilla.firefox",
                 "com.brave.browser", "com.opera.browser"]:
         try:
@@ -99,7 +97,6 @@ def open_browser(url):
                 return True
         except:
             pass
-
     try:
         r = subprocess.run([
             "am", "start", "-a", "android.intent.action.VIEW", "-d", url
@@ -108,17 +105,14 @@ def open_browser(url):
             return True
     except:
         pass
-
     try:
         subprocess.run(["termux-open-url", url], timeout=4, capture_output=True)
         return True
     except:
         pass
-
     return False
 
 def copy_to_clipboard(text):
-    """Retries clipboard injection to bypass Android background limits."""
     for attempt in range(4):
         try:
             r = subprocess.run(
@@ -200,19 +194,15 @@ def get_duration(video_path):
     except:
         return 30.0
 
-# ── Video loader (MediaStore-filtered) ───────────────────
 def mediastore_filenames():
-    """Returns set of valid Gallery filenames, or None if the query fails completely."""
     try:
         r = subprocess.run([
             "content", "query",
             "--uri", "content://media/external/video/media",
             "--projection", "_data",
         ], capture_output=True, timeout=10, text=True, check=False)
-        
         if r.returncode != 0:
             return None
-            
         names = set()
         for line in r.stdout.splitlines():
             if "_data=" in line:
@@ -223,56 +213,43 @@ def mediastore_filenames():
         return None
 
 def load_videos():
-    """Load valid videos, strictly enforcing Gallery state."""
     if not os.path.exists(SCOOPZ_DIR):
         return []
-
     all_files = [
         os.path.join(SCOOPZ_DIR, f)
         for f in os.listdir(SCOOPZ_DIR)
         if f.lower().endswith(".mp4") and not f.startswith(".")
     ]
-    
-    # Filter 1: Must physically exist AND be larger than 1KB (ignores ghost/trashed 0-byte files)
     existing = [v for v in all_files if os.path.exists(v) and os.path.getsize(v) > 1024]
-    
-    # Filter 2: Cross-reference with MediaStore
     known_names = mediastore_filenames()
-    
-    # If known_names is None, the query crashed. If it's [], the gallery is empty.
     if known_names is not None:
-        # STRICT FILTER: Only keep files that are officially registered in the gallery.
         existing = [v for v in existing if os.path.basename(v) in known_names]
-        
     existing.sort(key=os.path.getmtime, reverse=True)
     return existing
 
-# ── Thumbnails (FIXED: only for valid videos) ────────────
+# ── Thumbnails (Strict Filtering) ─────────────────────────
 def generate_thumbnails(videos):
     """
-    Generate thumbnails ONLY for videos in the provided list.
-    Delete orphaned thumbnails for videos no longer in the list.
+    Attempts to generate thumbnails. 
+    If a video fails (corrupted/trashed), it is dropped entirely.
     """
     os.makedirs(THUMB_DIR, exist_ok=True)
-    
-    # Get set of valid video basenames
     valid_names = {os.path.basename(v) for v in videos}
     
-    # Delete orphaned thumbnails
     try:
         for thumb in os.listdir(THUMB_DIR):
             if thumb.endswith(".jpg"):
-                source_name = thumb[:-4]  # strip .jpg
+                source_name = thumb[:-4]
                 if source_name not in valid_names:
                     try:
                         os.remove(os.path.join(THUMB_DIR, thumb))
-                        print(f"🗑️  Deleted orphan thumbnail: {thumb}")
                     except:
                         pass
     except:
         pass
     
     total = len(videos)
+    readable_videos = []
 
     for idx, vpath in enumerate(videos):
         if idx % 5 == 0:
@@ -281,7 +258,9 @@ def generate_thumbnails(videos):
         name       = os.path.basename(vpath)
         thumb_path = os.path.join(THUMB_DIR, name + ".jpg")
 
+        # Check if good thumbnail already exists
         if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 500:
+            readable_videos.append(vpath)
             continue
 
         success = False
@@ -322,23 +301,14 @@ def generate_thumbnails(videos):
             except:
                 pass
 
-        # Fallback: colored placeholder
-        if not success:
-            try:
-                color = f"0x{abs(hash(name)) % 0xFFFFFF:06x}"
-                label = name[:12].replace("'", "").replace(":", "")
-                subprocess.run([
-                    "ffmpeg", "-y", "-f", "lavfi",
-                    "-i", f"color=c={color}:size=180x320:duration=1",
-                    "-vframes", "1",
-                    "-vf", (f"drawtext=text='{label}':fontcolor=white"
-                            f":fontsize=14:x=(w-text_w)/2:y=(h-text_h)/2"),
-                    thumb_path
-                ], capture_output=True, timeout=10, check=False)
-            except:
-                pass
+        # Strict Filter: If all 3 methods failed, the file is trash. Drop it.
+        if success:
+            readable_videos.append(vpath)
+        else:
+            print(f"⚠️  Skipped corrupted or unreadable file: {name}")
 
     toast("Ready")
+    return readable_videos
 
 def get_thumb_b64(vpath):
     thumb = os.path.join(THUMB_DIR, os.path.basename(vpath) + ".jpg")
@@ -352,7 +322,6 @@ def get_thumb_b64(vpath):
 
 # ── Extraction (parallel) ─────────────────────────────────
 def _extract_frames(vpath, duration):
-    """Extract 2 frames at 10% and 50% duration."""
     for seek, out in [
         (max(0.5, duration * 0.10), TEMP_FRAME_1),
         (max(1.0, duration * 0.50), TEMP_FRAME_2),
@@ -369,7 +338,6 @@ def _extract_frames(vpath, duration):
             pass
 
 def _extract_audio(vpath):
-    """Extract mono mp3 at 32kbps."""
     if os.path.exists(TEMP_AUDIO):
         os.remove(TEMP_AUDIO)
     try:
@@ -382,27 +350,21 @@ def _extract_audio(vpath):
         pass
 
 def extract_parallel(vpath):
-    """Run frame + audio extraction simultaneously."""
     duration = get_duration(vpath)
-
     t_frames = threading.Thread(target=_extract_frames, args=(vpath, duration))
     t_audio  = threading.Thread(target=_extract_audio,  args=(vpath,))
     t_frames.start()
     t_audio.start()
     t_frames.join()
     t_audio.join()
-
     frames   = [p for p in [TEMP_FRAME_1, TEMP_FRAME_2]
                 if os.path.exists(p) and os.path.getsize(p) > 500]
     audio_ok = os.path.exists(TEMP_AUDIO) and os.path.getsize(TEMP_AUDIO) > 500
-
     return frames, audio_ok
 
 # ── Gemini ────────────────────────────────────────────────
 def generate_caption(api_key, frame_paths, audio_ok):
-    """Single Gemini multimodal call with frames + audio."""
     parts = []
-
     for fp in frame_paths:
         parts.append({
             "inline_data": {
@@ -410,7 +372,6 @@ def generate_caption(api_key, frame_paths, audio_ok):
                 "data": file_b64(fp)
             }
         })
-
     if audio_ok:
         parts.append({
             "inline_data": {
@@ -418,7 +379,6 @@ def generate_caption(api_key, frame_paths, audio_ok):
                 "data": file_b64(TEMP_AUDIO)
             }
         })
-
     parts.append({"text": CAPTION_PROMPT})
 
     payload = {
@@ -448,7 +408,6 @@ def generate_caption(api_key, frame_paths, audio_ok):
     raise ValueError("Gemini rate limit")
 
 def format_result(raw):
-    """Parse CAPTION + HASHTAGS, enforce 150 char total."""
     try:
         if "CAPTION:" in raw and "HASHTAGS:" in raw:
             caption  = raw.split("HASHTAGS:").replace("CAPTION:", "").strip()
@@ -592,7 +551,6 @@ class Handler(BaseHTTPRequestHandler):
                 body = build_html(self.videos).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
-                # ANTI-CACHE HEADERS
                 self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
                 self.send_header("Pragma", "no-cache")
                 self.send_header("Expires", "0")
@@ -653,8 +611,15 @@ def main():
         print("\n📂 0 videos found in gallery. Add some videos and run again.\n")
         sys.exit(1)
 
-    print(f"📹 Found {len(videos)} valid videos")
-    generate_thumbnails(videos)
+    # STRICT FILTERING: Re-assign videos to ONLY the ones that survived thumbnail generation
+    videos = generate_thumbnails(videos)
+    
+    if not videos:
+        toast("No readable videos found!")
+        print("\n🚨 Found files, but they are all corrupted/unreadable. Clean out your folder!\n")
+        sys.exit(1)
+        
+    print(f"📹 Serving {len(videos)} perfectly readable videos")
     Handler.videos = videos
 
     kill_port(PORT)
