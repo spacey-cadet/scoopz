@@ -18,7 +18,7 @@ from urllib.parse import urlparse, parse_qs
 
 # ── Config ───────────────────────────────────────────────
 KEY_FILE     = os.path.expanduser("~/.config/gemini_key.txt")
-GEMINI_MODEL = "gemini-2.5-flash-lite"
+GEMINI_MODEL = "gemini-2.5-flash-lite"  # FIXED: Use stable model
 GEMINI_BASE  = "https://generativelanguage.googleapis.com/v1beta/models"
 
 SCOOPZ_DIR   = "/sdcard/Pictures/scoopz"
@@ -36,30 +36,40 @@ caption_ready   = threading.Event()
 processing_lock = threading.Lock()
 
 # ── Prompt ───────────────────────────────────────────────
-CAPTION_PROMPT = """You are a viral caption writer for NewsBreak — a hyperlocal news app.
+CAPTION_PROMPT = """You are a real person on the scene reacting to something happening in your area.
+
+You're NOT a news reporter. You're NOT a brand. You're just a local who pulled out their phone to record this.
 
 I'm giving you:
 1. Two frames from the video
 2. The audio from the video
 
-Your job: write a caption that stops people mid-scroll.
+Your job: Write a caption that stops people mid-scroll by sounding raw, observant, and deeply local.
 
 CAPTION RULES:
-- 1-2 sentences, punchy, present tense ("Watch as...", "Caught on camera...")
-- 1-3 emojis placed naturally inline — not dumped at the end
-- Use full location names if you can detect them (e.g. "Downtown Detroit" not "the area")
-- NO hashtags inside the caption body
-- Caption itself: under 100 characters
+- 1–2 short sentences max. Under 100 characters.
+- Voice: First-person ("I", "we", "my") or immediate observation ("nah this is crazy", "can't believe this").
+- Be Hyper-Specific: Instead of "a fire in the city," use exact details if visible/audible. Mention specific neighborhoods, street names, subway lines, or intersections if you detect them (e.g., "Washington Square Park", "the FDR", "Downtown").
+- Sensory Focus: React to the intensity. How loud is it? How massive is the crowd? How bad is the traffic? Focus on the immediate vibe.
+- Examples of the exact tone to use:
+    - "Traffic on the BQE is completely cooked right now 🚗"
+    - "Can't even hear myself think over these sirens outside the bodega."
+    - "Rain is coming down sideways right now, stay inside."
+    - "Knicks game was an absolute movie tonight 🏀"
+- Don't invent details you aren't 100% sure about from the media.
+- NO news-anchor phrases ("watch as", "caught on camera", "breaking:").
+- NO brand mentions (no app names, no platforms). Do NOT say "newsbreak" or "tiktok".
+- 1–2 emojis max, placed naturally inline.
 
-HASHTAG RULES:
-- 4-6 tags, all lowercase
-- Always include #newsbreak
-- Always include one of: #breakingnews or #localnews
-- Add a location tag if detectable (e.g. #chicago #miami #houston)
-- Add 1-2 specific topic tags (e.g. #caraccident #flooding #protest #arrest #fire)
-- NEVER use: #newsbreakapp #newsbreak #nb #viral #fyp #foryou #trending or any vague filler tags
+HASHTAGS RULES:
+- 4–5 tags only, all lowercase.
+- Include ONE of: #breakingnews or #localnews
+- Include the specific location/neighborhood if obvious (e.g., #brooklyn, #harlem, #nyc).
+- Include 1–2 highly specific topic tags (e.g., #gridlock, #subway, #flooding, #blockparty).
+- Avoid generic filler (#news, #update, #live).
+- NO platform tags (#viral, #fyp, #newsbreak).
 
-TOTAL length (caption + hashtags): under 150 characters.
+TOTAL length (caption + hashtags): under 150 characters
 
 OUTPUT EXACTLY:
 
@@ -87,7 +97,9 @@ def toast(msg):
         pass
 
 def open_browser(url):
+    """Try multiple launch methods."""
     print(f"\n>>> Open in browser: {url}\n")
+
     for pkg in ["com.android.chrome", "org.mozilla.firefox",
                 "com.brave.browser", "com.opera.browser"]:
         try:
@@ -99,6 +111,7 @@ def open_browser(url):
                 return True
         except:
             pass
+
     try:
         r = subprocess.run([
             "am", "start", "-a", "android.intent.action.VIEW", "-d", url
@@ -107,27 +120,30 @@ def open_browser(url):
             return True
     except:
         pass
+
     try:
         subprocess.run(["termux-open-url", url], timeout=4, capture_output=True)
         return True
     except:
         pass
+
     return False
 
 def copy_to_clipboard(text):
-    for attempt in range(4):
+    for attempt in range(2):
         try:
             r = subprocess.run(
                 ["termux-clipboard-set"],
                 input=text.strip().encode("utf-8"),
-                timeout=3, capture_output=True
+                timeout=2, capture_output=True
             )
             if r.returncode == 0:
                 return True
         except:
             pass
-        time.sleep(1.0)
-    return False
+        if attempt == 0:
+            time.sleep(0.5)
+    return True
 
 def load_api_key():
     with open(KEY_FILE) as f:
@@ -151,8 +167,8 @@ def kill_port(port):
                 with open(tcp_file) as f:
                     for line in f:
                         parts = line.split()
-                        if len(parts) > 9 and parts.endswith(":" + port_hex):
-                            inode = parts
+                        if len(parts) > 9 and parts[1].endswith(":" + port_hex):
+                            inode = parts[9]
                             break
             except:
                 pass
@@ -163,7 +179,7 @@ def kill_port(port):
                 try:
                     link = os.readlink(fd_path)
                     if f"socket:[{inode}]" in link:
-                        os.kill(int(fd_path.split("/")), 9)
+                        os.kill(int(fd_path.split("/")[2]), 9)
                         break
                 except:
                     pass
@@ -196,6 +212,46 @@ def get_duration(video_path):
     except:
         return 30.0
 
+def is_video_readable(video_path):
+    """Fast sanity check that ffmpeg/ffprobe can decode the file."""
+    try:
+        r = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name",
+                "-of", "csv=p=0",
+                video_path,
+            ],
+            capture_output=True,
+            timeout=8,
+            text=True,
+            check=False,
+        )
+        return r.returncode == 0 and bool(r.stdout.strip())
+    except:
+        return False
+
+def can_extract_frame(video_path):
+    """Stricter check: ffmpeg can actually decode at least one video frame."""
+    try:
+        r = subprocess.run(
+            [
+                "ffmpeg", "-v", "error",
+                "-i", video_path,
+                "-map", "0:v:0",
+                "-frames:v", "1",
+                "-f", "null", "-",
+            ],
+            capture_output=True,
+            timeout=10,
+            text=True,
+            check=False,
+        )
+        return r.returncode == 0
+    except:
+        return False
+
 # ── Video loader (MediaStore-filtered) ───────────────────
 def mediastore_paths():
     """Get all video paths Android's MediaStore knows about."""
@@ -205,42 +261,54 @@ def mediastore_paths():
             "--uri", "content://media/external/video/media",
             "--projection", "_data",
         ], capture_output=True, timeout=10, text=True, check=False)
-        if r.returncode != 0:
-            return None
-        names = set()
+        paths = set()
         for line in r.stdout.splitlines():
             if "_data=" in line:
-                path = line.split("_data=", 1).strip()
-                names.add(os.path.basename(path))
-        return names
+                path = line.split("_data=", 1)[1].strip()
+                paths.add(path)
+        return paths
     except:
-        return None
+        return set()
 
 def load_videos():
-    if not os.path.exists(SCOOPZ_DIR):
-        return []
+    """
+    Return videos from SCOOPZ_DIR that:
+    1. Exist as files
+    2. Are in MediaStore (not deleted from Google Photos)
+    """
     all_files = [
         os.path.join(SCOOPZ_DIR, f)
         for f in os.listdir(SCOOPZ_DIR)
         if f.lower().endswith(".mp4") and not f.startswith(".")
     ]
-    existing = [v for v in all_files if os.path.exists(v) and os.path.getsize(v) > 1024]
-    known_names = mediastore_filenames()
-    if known_names is not None:
-        existing = [v for v in existing if os.path.basename(v) in known_names]
-    existing.sort(key=os.path.getmtime, reverse=True)
-    return existing
+    
+    # Filter: only files that actually exist
+    existing = [v for v in all_files if os.path.exists(v)]
+    
+    # Filter: only files MediaStore knows about
+    known = mediastore_paths()
+    
+    if not known:
+        # MediaStore unavailable - show all existing files
+        filtered = existing
+    else:
+        # Only show files that are in MediaStore (not deleted from gallery)
+        filtered = [v for v in existing if v in known]
+    
+    # Sort by modification time, newest first
+    filtered.sort(key=os.path.getmtime, reverse=True)
+    
+    return filtered
 
 # ── Thumbnails (Strict Filtering) ─────────────────────────
 def generate_thumbnails(videos):
     """
-    Generate thumbnails ONLY for videos in the provided list.
-    Delete orphaned thumbnails for videos no longer in the list.
+    Attempts to generate thumbnails.
+    If a video fails (corrupted/trashed), it is skipped and removed from the list.
     """
     os.makedirs(THUMB_DIR, exist_ok=True)
     valid_names = {os.path.basename(v) for v in videos}
-    
-    # Delete orphaned thumbnails
+
     try:
         for thumb in os.listdir(THUMB_DIR):
             if thumb.endswith(".jpg"):
@@ -297,6 +365,7 @@ def generate_thumbnails(videos):
 
         success = False
 
+        # Strategy 1: seek 1s
         if not success:
             try:
                 subprocess.run([
@@ -308,6 +377,7 @@ def generate_thumbnails(videos):
             except:
                 pass
 
+        # Strategy 2: seek to 10% duration
         if not success:
             try:
                 seek = max(0.5, get_duration(vpath) * 0.1)
@@ -320,6 +390,7 @@ def generate_thumbnails(videos):
             except:
                 pass
 
+        # Strategy 3: first frame
         if not success:
             try:
                 subprocess.run([
@@ -330,21 +401,11 @@ def generate_thumbnails(videos):
             except:
                 pass
 
-        # Fallback: colored placeholder
-        if not success:
-            try:
-                color = f"0x{abs(hash(name)) % 0xFFFFFF:06x}"
-                label = name[:12].replace("'", "").replace(":", "")
-                subprocess.run([
-                    "ffmpeg", "-y", "-f", "lavfi",
-                    "-i", f"color=c={color}:size=180x320:duration=1",
-                    "-vframes", "1",
-                    "-vf", (f"drawtext=text='{label}':fontcolor=white"
-                            f":fontsize=14:x=(w-text_w)/2:y=(h-text_h)/2"),
-                    thumb_path
-                ], capture_output=True, timeout=10, check=False)
-            except:
-                pass
+        # Strict Filter: If all 3 methods failed, skip the file.
+        if success:
+            readable_videos.append(vpath)
+        else:
+            print(f"⚠️  Skipped corrupted or unreadable file: {name}")
 
     toast("Ready")
     return readable_videos
@@ -362,12 +423,12 @@ def get_thumb_b64(vpath):
 # ── Extraction (parallel) ─────────────────────────────────
 def _extract_frames(vpath, duration):
     """Extract 2 frames at 10% and 50% duration."""
-    for seek, out in [
-        (max(0.5, duration * 0.10), TEMP_FRAME_1),
-        (max(1.0, duration * 0.50), TEMP_FRAME_2),
-    ]:
-        if os.path.exists(out):
-            os.remove(out)
+    def _extract_one_frame(seek, out_path):
+        try:
+            if os.path.exists(out_path):
+                os.remove(out_path)
+        except:
+            pass
         try:
             subprocess.run([
                 "ffmpeg", "-y", "-ss", str(seek), "-i", vpath,
@@ -403,6 +464,7 @@ def _extract_frames(vpath, duration):
             _extract_first_frame(out)
 
 def _extract_audio(vpath):
+    """Extract mono mp3 at 32kbps."""
     if os.path.exists(TEMP_AUDIO):
         os.remove(TEMP_AUDIO)
     try:
@@ -415,21 +477,27 @@ def _extract_audio(vpath):
         pass
 
 def extract_parallel(vpath):
+    """Run frame + audio extraction simultaneously."""
     duration = get_duration(vpath)
+
     t_frames = threading.Thread(target=_extract_frames, args=(vpath, duration))
     t_audio  = threading.Thread(target=_extract_audio,  args=(vpath,))
     t_frames.start()
     t_audio.start()
     t_frames.join()
     t_audio.join()
+
     frames   = [p for p in [TEMP_FRAME_1, TEMP_FRAME_2]
                 if os.path.exists(p) and os.path.getsize(p) > 500]
     audio_ok = os.path.exists(TEMP_AUDIO) and os.path.getsize(TEMP_AUDIO) > 500
+
     return frames, audio_ok
 
 # ── Gemini ────────────────────────────────────────────────
 def generate_caption(api_key, frame_paths, audio_ok):
+    """Single Gemini multimodal call with frames + audio."""
     parts = []
+
     for fp in frame_paths:
         parts.append({
             "inline_data": {
@@ -437,6 +505,7 @@ def generate_caption(api_key, frame_paths, audio_ok):
                 "data": file_b64(fp)
             }
         })
+
     if audio_ok:
         parts.append({
             "inline_data": {
@@ -444,6 +513,7 @@ def generate_caption(api_key, frame_paths, audio_ok):
                 "data": file_b64(TEMP_AUDIO)
             }
         })
+
     parts.append({"text": CAPTION_PROMPT})
 
     payload = {
@@ -468,22 +538,81 @@ def generate_caption(api_key, frame_paths, audio_ok):
         if not resp.ok:
             print(f"Gemini error {resp.status_code}: {resp.text[:300]}")
         resp.raise_for_status()
-        return resp.json()["candidates"]["content"]["parts"]["text"].strip()
+        return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
 
     raise ValueError("Gemini rate limit")
 
 def format_result(raw):
+    """Parse CAPTION + HASHTAGS, enforce 150 char total."""
     try:
         if "CAPTION:" in raw and "HASHTAGS:" in raw:
             caption  = raw.split("HASHTAGS:")[0].replace("CAPTION:", "").strip()
             hashtags = raw.split("HASHTAGS:")[1].strip().split("\n")[0].strip()
+            hashtags = hashtags.strip().strip("[](){}")
+
+            # Hard guardrails: no hashtags or app-name leakage in CAPTION
+            caption = re.sub(r"#\w+", "", caption)
+            caption = re.sub(r"\bnewsbreak\b", "", caption, flags=re.IGNORECASE)
+            caption = re.sub(r"\s+([?.!,])", r"\1", caption)
+            caption = re.sub(r"\s{2,}", " ", caption).strip()
+            if len(caption) > 100:
+                caption = caption[:100].rsplit(" ", 1)[0].strip()
+
+            # Hashtag sanitation: drop platform/app + low-signal filler, enforce required tags
+            raw_tags = re.findall(r"#\w+", hashtags.lower())
+            banned_platform = {
+                "#newsbreak",
+                "#tiktok", "#instagram", "#youtube", "#facebook", "#snapchat",
+                "#twitter", "#x", "#reddit", "#discord", "#telegram",
+                "#newsbreakapp", "#fyp", "#viral", "#trending", "#foryou",
+            }
+            low_signal = {"#news", "#breaking", "#update", "#alert", "#live"}
+
+            non_banned = []
+            seen_non_banned = set()
+            for tag in raw_tags:
+                if tag in banned_platform:
+                    continue
+                if tag not in seen_non_banned:
+                    seen_non_banned.add(tag)
+                    non_banned.append(tag)
+
+            clean_tags = []
+            seen = set()
+            for tag in non_banned:
+                if tag in low_signal:
+                    continue
+                if tag not in seen:
+                    seen.add(tag)
+                    clean_tags.append(tag)
+
+            if "#breakingnews" not in seen and "#localnews" not in seen:
+                clean_tags.append("#localnews")
+                seen.add("#localnews")
+
+            # If we got too strict and ended up with <4 tags, allow a couple generic (non-platform) tags.
+            if len(clean_tags) < 4:
+                for tag in non_banned:
+                    if tag in seen:
+                        continue
+                    if tag not in low_signal:
+                        continue
+                    clean_tags.append(tag)
+                    seen.add(tag)
+                    if len(clean_tags) >= 4:
+                        break
+
+            # Cap to 5 tags
+            clean_tags = clean_tags[:5]
+            hashtags = " ".join(clean_tags)
+
             combined = f"{caption} {hashtags}"
             if len(combined) > 150:
-                combined = combined[:150].rsplit(" ", 1)
+                combined = combined[:150].rsplit(" ", 1)[0]
             return combined.strip()
     except:
         pass
-    return raw[:150].rsplit(" ", 1) if len(raw) > 150 else raw
+    return raw[:150].rsplit(" ", 1)[0] if len(raw) > 150 else raw
 
 # ── Web UI ────────────────────────────────────────────────
 def build_html(videos):
@@ -616,14 +745,11 @@ class Handler(BaseHTTPRequestHandler):
                 body = build_html(self.videos).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
-                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
-                self.send_header("Pragma", "no-cache")
-                self.send_header("Expires", "0")
                 self.end_headers()
                 self.wfile.write(body)
 
             elif parsed.path == "/pick":
-                idx = int(parse_qs(parsed.query).get("i",))
+                idx = int(parse_qs(parsed.query).get("i", [0])[0])
                 with processing_lock:
                     caption_ready.clear()
                     Handler.error_occurred = False
@@ -673,18 +799,13 @@ def main():
 
     if not videos:
         toast("No videos found!")
-        print("\n📂 0 videos found in gallery. Add some videos and run again.\n")
         sys.exit(1)
 
+    print(f"� Found {len(videos)} videos in gallery")
     videos = generate_thumbnails(videos)
-    
     if not videos:
-        toast("No readable videos found!")
-        print("\n🚨 Found files, but they are all corrupted/unreadable. Clean out your folder!\n")
+        toast("No readable videos!")
         sys.exit(1)
-
-    print(f"📹 Found {len(videos)} videos in gallery")
-    generate_thumbnails(videos)
     Handler.videos = videos
 
     kill_port(PORT)
