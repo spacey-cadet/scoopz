@@ -150,7 +150,10 @@ def copy_to_clipboard(text):
         return False
 
     def _normalize(s: str) -> str:
-        return re.sub(r"\s+", " ", (s or "").strip())
+        s = (s or "").replace("\r\n", "\n").replace("\r", "\n")
+        # Termux clipboard can sometimes normalize emoji presentation (VS16/ZWJ).
+        s = s.replace("\ufe0f", "").replace("\u200d", "")
+        return re.sub(r"\s+", " ", s.strip())
 
     last_err = ""
     for attempt in range(5):
@@ -165,26 +168,35 @@ def copy_to_clipboard(text):
             if r.returncode != 0:
                 last_err = (r.stderr or r.stdout or b"")[:120].decode("utf-8", "ignore")
             else:
-                # Verify if possible.
+                # Verify if possible (best-effort). Don't fail UI on flaky reads.
                 try:
-                    g = subprocess.run(
-                        ["termux-clipboard-get"],
-                        timeout=4,
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                    if g.returncode == 0:
+                    ok = False
+                    for delay in (0.0, 0.12, 0.25):
+                        if delay:
+                            time.sleep(delay)
+                        g = subprocess.run(
+                            ["termux-clipboard-get"],
+                            timeout=4,
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        if g.returncode != 0:
+                            continue
                         if _normalize(g.stdout) == _normalize(expected):
-                            return True
-                        last_err = "clipboard verify mismatch"
-                    else:
-                        # Can't verify; treat a successful set as success.
-                        return True
+                            ok = True
+                            break
+
+                    if not ok:
+                        # Soft warning only: set succeeded, but read-back didn't match.
+                        print("⚠️ Clipboard verify mismatch (set likely succeeded)")
+                    return True
                 except FileNotFoundError:
                     return True
                 except Exception as e:
-                    last_err = str(e)[:80]
+                    # Soft warning only.
+                    print(f"⚠️ Clipboard verify failed (set likely succeeded): {str(e)[:80]}")
+                    return True
         except FileNotFoundError:
             last_err = "termux-clipboard-set not found"
             break
