@@ -11,6 +11,7 @@ import time
 import base64
 import threading
 import socket
+import re
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -35,37 +36,48 @@ caption_ready   = threading.Event()
 processing_lock = threading.Lock()
 
 # ── Prompt ───────────────────────────────────────────────
-CAPTION_PROMPT = """You are a viral caption writer for NewsBreak — a hyperlocal news app.
+CAPTION_PROMPT = """You are a real person on the scene reacting to something happening in your area.
+
+You're NOT a news reporter.
+You're NOT a brand.
+You're just someone who saw this and is posting it.
 
 I'm giving you:
-1. Two frames from the video (at 10% and 50% of its duration)
-2. The audio from the video — listen carefully to what is being said
+1. Two frames from the video
+2. The audio from the video
 
-Your job: write a caption that stops people mid-scroll.
+Write like a human reacting in the moment.
 
 CAPTION RULES:
-- 1-2 sentences, punchy, present tense ("Watch as...", "Caught on camera...")
-- 1-3 emojis placed naturally inline — not dumped at the end
-- Use full location names if you can detect them (e.g. "Downtown Detroit" not "the area")
-- NO hashtags inside the caption body
-- Caption itself: under 100 characters
+- 1–2 short sentences max
+- First-person or natural voice ("I just saw...", "this just happened...", "nah this is crazy...")
+- Sound raw, real, slightly emotional if it fits
+- If obvious, include what happened + where + who/what + when ("just now", "tonight")
+- Don't invent details you're not sure about
+- NO news-anchor phrases (no "watch as", no "caught on camera")
+- NO brand mentions (no app names, no platforms)
+- Do NOT say "newsbreak" anywhere
+- 1–2 emojis max, used naturally
+- Under 100 characters
 
-HASHTAG RULES:
-- 4-6 tags, all lowercase
-- Always include #newsbreak
-- Always include one of: #breakingnews or #localnews
-- Add a location tag if detectable (e.g. #chicago #miami #houston)
-- Add 1-2 specific topic tags (e.g. #caraccident #flooding #protest #arrest #fire)
-- NEVER use: #newsbreakapp #newsbreak #nb #viral #fyp #foryou #trending or any vague filler tags
+HASHTAGS RULES:
+- 4–5 tags only
+- lowercase
+- include ONE of: #breakingnews or #localnews
+- include location if obvious
+- include 1–2 specific topic tags
+- Avoid generic filler tags like #news #breaking #update (be specific)
+- NO platform/app tags (no app/platform names, and do not include #newsbreak), no spam tags (#viral, #fyp, #trending, etc.)
 
-TOTAL length (caption + space + hashtags): 150 characters max.
+TOTAL length (caption + hashtags): under 150 characters
 
-OUTPUT FORMAT — output exactly this structure, nothing else, no extra commentary:
+OUTPUT EXACTLY:
+
 CAPTION:
-[caption text here]
+caption text
 
 HASHTAGS:
-[#tag1 #tag2 #tag3 #tag4]"""
+#tag1 #tag2 #tag3 #tag4"""
 
 # ── Utilities ─────────────────────────────────────────────
 def notify(title, msg, notif_id="nb_status"):
@@ -200,6 +212,46 @@ def get_duration(video_path):
     except:
         return 30.0
 
+def is_video_readable(video_path):
+    """Fast sanity check that ffmpeg/ffprobe can decode the file."""
+    try:
+        r = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=codec_name",
+                "-of", "csv=p=0",
+                video_path,
+            ],
+            capture_output=True,
+            timeout=8,
+            text=True,
+            check=False,
+        )
+        return r.returncode == 0 and bool(r.stdout.strip())
+    except:
+        return False
+
+def can_extract_frame(video_path):
+    """Stricter check: ffmpeg can actually decode at least one video frame."""
+    try:
+        r = subprocess.run(
+            [
+                "ffmpeg", "-v", "error",
+                "-i", video_path,
+                "-map", "0:v:0",
+                "-frames:v", "1",
+                "-f", "null", "-",
+            ],
+            capture_output=True,
+            timeout=10,
+            text=True,
+            check=False,
+        )
+        return r.returncode == 0
+    except:
+        return False
+
 # ── Video loader (MediaStore-filtered) ───────────────────
 def mediastore_paths():
     """Get all video paths Android's MediaStore knows about."""
@@ -248,32 +300,29 @@ def load_videos():
     
     return filtered
 
-# ── Thumbnails (FIXED: only for valid videos) ────────────
+# ── Thumbnails (Strict Filtering) ─────────────────────────
 def generate_thumbnails(videos):
     """
-    Generate thumbnails ONLY for videos in the provided list.
-    Delete orphaned thumbnails for videos no longer in the list.
+    Attempts to generate thumbnails.
+    If a video fails (corrupted/trashed), it is skipped and removed from the list.
     """
     os.makedirs(THUMB_DIR, exist_ok=True)
-    
-    # Get set of valid video basenames
     valid_names = {os.path.basename(v) for v in videos}
-    
-    # Delete orphaned thumbnails
+
     try:
         for thumb in os.listdir(THUMB_DIR):
             if thumb.endswith(".jpg"):
-                source_name = thumb[:-4]  # strip .jpg
+                source_name = thumb[:-4]
                 if source_name not in valid_names:
                     try:
                         os.remove(os.path.join(THUMB_DIR, thumb))
-                        print(f"🗑️  Deleted orphan thumbnail: {thumb}")
                     except:
                         pass
     except:
         pass
-    
+
     total = len(videos)
+    readable_videos = []
 
     for idx, vpath in enumerate(videos):
         if idx % 5 == 0:
@@ -282,8 +331,37 @@ def generate_thumbnails(videos):
         name       = os.path.basename(vpath)
         thumb_path = os.path.join(THUMB_DIR, name + ".jpg")
 
-        if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 500:
+        # Strict Filter: if the file isn't decodable, drop it (and any stale thumbnail).
+        if not is_video_readable(vpath):
+            try:
+                if os.path.exists(thumb_path):
+                    os.remove(thumb_path)
+            except:
+                pass
+            print(f"⚠️  Skipped corrupted or unreadable file: {name}")
             continue
+
+        # Strict Filter: if ffmpeg can't extract even 1 frame, it's not usable.
+        if not can_extract_frame(vpath):
+            try:
+                if os.path.exists(thumb_path):
+                    os.remove(thumb_path)
+            except:
+                pass
+            print(f"⚠️  Skipped corrupted or unreadable file: {name}")
+            continue
+
+        # Check if good thumbnail already exists
+        if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 500:
+            readable_videos.append(vpath)
+            continue
+
+        # Avoid stale thumbnails causing false positives when ffmpeg fails
+        try:
+            if os.path.exists(thumb_path):
+                os.remove(thumb_path)
+        except:
+            pass
 
         success = False
 
@@ -323,23 +401,14 @@ def generate_thumbnails(videos):
             except:
                 pass
 
-        # Fallback: colored placeholder
-        if not success:
-            try:
-                color = f"0x{abs(hash(name)) % 0xFFFFFF:06x}"
-                label = name[:12].replace("'", "").replace(":", "")
-                subprocess.run([
-                    "ffmpeg", "-y", "-f", "lavfi",
-                    "-i", f"color=c={color}:size=180x320:duration=1",
-                    "-vframes", "1",
-                    "-vf", (f"drawtext=text='{label}':fontcolor=white"
-                            f":fontsize=14:x=(w-text_w)/2:y=(h-text_h)/2"),
-                    thumb_path
-                ], capture_output=True, timeout=10, check=False)
-            except:
-                pass
+        # Strict Filter: If all 3 methods failed, skip the file.
+        if success:
+            readable_videos.append(vpath)
+        else:
+            print(f"⚠️  Skipped corrupted or unreadable file: {name}")
 
     toast("Ready")
+    return readable_videos
 
 def get_thumb_b64(vpath):
     thumb = os.path.join(THUMB_DIR, os.path.basename(vpath) + ".jpg")
@@ -354,20 +423,45 @@ def get_thumb_b64(vpath):
 # ── Extraction (parallel) ─────────────────────────────────
 def _extract_frames(vpath, duration):
     """Extract 2 frames at 10% and 50% duration."""
-    for seek, out in [
-        (max(0.5, duration * 0.10), TEMP_FRAME_1),
-        (max(1.0, duration * 0.50), TEMP_FRAME_2),
-    ]:
-        if os.path.exists(out):
-            os.remove(out)
+    def _extract_one_frame(seek, out_path):
+        try:
+            if os.path.exists(out_path):
+                os.remove(out_path)
+        except:
+            pass
         try:
             subprocess.run([
                 "ffmpeg", "-y", "-ss", str(seek), "-i", vpath,
                 "-vframes", "1", "-q:v", "3", "-vf", "scale=640:-1",
-                out
+                out_path
             ], capture_output=True, timeout=15, check=False)
         except:
             pass
+        return os.path.exists(out_path) and os.path.getsize(out_path) > 500
+
+    def _extract_first_frame(out_path):
+        try:
+            if os.path.exists(out_path):
+                os.remove(out_path)
+        except:
+            pass
+        try:
+            subprocess.run([
+                "ffmpeg", "-y", "-i", vpath,
+                "-vframes", "1", "-q:v", "5", "-vf", "scale=640:-1",
+                out_path
+            ], capture_output=True, timeout=15, check=False)
+        except:
+            pass
+        return os.path.exists(out_path) and os.path.getsize(out_path) > 500
+
+    for seek, out in [
+        (max(0.5, duration * 0.10), TEMP_FRAME_1),
+        (max(1.0, duration * 0.50), TEMP_FRAME_2),
+    ]:
+        ok = _extract_one_frame(seek, out)
+        if not ok:
+            _extract_first_frame(out)
 
 def _extract_audio(vpath):
     """Extract mono mp3 at 32kbps."""
@@ -425,7 +519,7 @@ def generate_caption(api_key, frame_paths, audio_ok):
     payload = {
         "contents": [{"parts": parts}],
         "generationConfig": {
-            "temperature": 0.85,
+            "temperature": 1.0,
             "maxOutputTokens": 220
         }
     }
@@ -454,6 +548,64 @@ def format_result(raw):
         if "CAPTION:" in raw and "HASHTAGS:" in raw:
             caption  = raw.split("HASHTAGS:")[0].replace("CAPTION:", "").strip()
             hashtags = raw.split("HASHTAGS:")[1].strip().split("\n")[0].strip()
+            hashtags = hashtags.strip().strip("[](){}")
+
+            # Hard guardrails: no hashtags or app-name leakage in CAPTION
+            caption = re.sub(r"#\w+", "", caption)
+            caption = re.sub(r"\bnewsbreak\b", "", caption, flags=re.IGNORECASE)
+            caption = re.sub(r"\s+([?.!,])", r"\1", caption)
+            caption = re.sub(r"\s{2,}", " ", caption).strip()
+            if len(caption) > 100:
+                caption = caption[:100].rsplit(" ", 1)[0].strip()
+
+            # Hashtag sanitation: drop platform/app + low-signal filler, enforce required tags
+            raw_tags = re.findall(r"#\w+", hashtags.lower())
+            banned_platform = {
+                "#newsbreak",
+                "#tiktok", "#instagram", "#youtube", "#facebook", "#snapchat",
+                "#twitter", "#x", "#reddit", "#discord", "#telegram",
+                "#newsbreakapp", "#fyp", "#viral", "#trending", "#foryou",
+            }
+            low_signal = {"#news", "#breaking", "#update", "#alert", "#live"}
+
+            non_banned = []
+            seen_non_banned = set()
+            for tag in raw_tags:
+                if tag in banned_platform:
+                    continue
+                if tag not in seen_non_banned:
+                    seen_non_banned.add(tag)
+                    non_banned.append(tag)
+
+            clean_tags = []
+            seen = set()
+            for tag in non_banned:
+                if tag in low_signal:
+                    continue
+                if tag not in seen:
+                    seen.add(tag)
+                    clean_tags.append(tag)
+
+            if "#breakingnews" not in seen and "#localnews" not in seen:
+                clean_tags.append("#localnews")
+                seen.add("#localnews")
+
+            # If we got too strict and ended up with <4 tags, allow a couple generic (non-platform) tags.
+            if len(clean_tags) < 4:
+                for tag in non_banned:
+                    if tag in seen:
+                        continue
+                    if tag not in low_signal:
+                        continue
+                    clean_tags.append(tag)
+                    seen.add(tag)
+                    if len(clean_tags) >= 4:
+                        break
+
+            # Cap to 5 tags
+            clean_tags = clean_tags[:5]
+            hashtags = " ".join(clean_tags)
+
             combined = f"{caption} {hashtags}"
             if len(combined) > 150:
                 combined = combined[:150].rsplit(" ", 1)[0]
@@ -650,7 +802,10 @@ def main():
         sys.exit(1)
 
     print(f"📹 Found {len(videos)} videos in gallery")
-    generate_thumbnails(videos)
+    videos = generate_thumbnails(videos)
+    if not videos:
+        toast("No readable videos!")
+        sys.exit(1)
     Handler.videos = videos
 
     kill_port(PORT)
