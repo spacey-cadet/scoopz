@@ -12,6 +12,7 @@ import base64
 import threading
 import socket
 import re
+import json
 import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
@@ -35,6 +36,17 @@ selected_video  = None
 caption_ready   = threading.Event()
 processing_lock = threading.Lock()
 
+# Live processing state for UI/debugging
+processing_stage  = "idle"   # idle | queued | extracting | generating | done | error
+processing_detail = ""
+
+
+def set_processing_stage(stage: str, detail: str = ""):
+    global processing_stage, processing_detail
+    with processing_lock:
+        processing_stage = stage
+        processing_detail = detail
+
 # ── Prompt ───────────────────────────────────────────────
 CAPTION_PROMPT = """You are a real person on the scene reacting to something happening in your area.
 
@@ -47,19 +59,22 @@ I'm giving you:
 Your job: Write a caption that stops people mid-scroll by sounding raw, observant, and deeply local.
 
 CAPTION RULES:
-- 1–2 short sentences max. Under 100 characters.
+- 1–2 short sentences max. Under 130 characters.
 - Voice: First-person ("I", "we", "my") or immediate observation ("nah this is crazy", "can't believe this").
+- Avoid stock/opening phrases that feel scripted. Do NOT start the caption with: "nah", "this is crazy", "this is wild", "can't believe".
+- Start with the concrete detail first (what/where), then the reaction.
 - Be Hyper-Specific: Instead of "a fire in the city," use exact details if visible/audible. Mention specific neighborhoods, street names, subway lines, or intersections if you detect them (e.g., "Washington Square Park", "the FDR", "Downtown").
+- Slightly more complete than a one-liner: include (1) what’s happening + (2) where it is (if you can tell) + (3) your reaction.
 - Sensory Focus: React to the intensity. How loud is it? How massive is the crowd? How bad is the traffic? Focus on the immediate vibe.
 - Examples of the exact tone to use:
-    - "Traffic on the BQE is completely cooked right now 🚗"
-    - "Can't even hear myself think over these sirens outside the bodega."
-    - "Rain is coming down sideways right now, stay inside."
-    - "Knicks game was an absolute movie tonight 🏀"
+    - "Traffic on the BQE is completely cooked right now 🚗😩"
+    - "Can't even hear myself think over these sirens outside the bodega 🚨😳"
+    - "Rain is coming down sideways right now, stay inside 🌧️😬"
+    - "Knicks game was an absolute movie tonight 🏀🔥"
 - Don't invent details you aren't 100% sure about from the media.
 - NO news-anchor phrases ("watch as", "caught on camera", "breaking:").
 - NO brand mentions (no app names, no platforms). Do NOT say "newsbreak" or "tiktok".
-- 1–2 emojis max, placed naturally inline.
+- Use 2–3 emojis max, placed naturally inline.
 
 HASHTAGS RULES:
 - 4–5 tags only, all lowercase.
@@ -69,7 +84,7 @@ HASHTAGS RULES:
 - Avoid generic filler (#news, #update, #live).
 - NO platform tags (#viral, #fyp, #newsbreak).
 
-TOTAL length (caption + hashtags): under 150 characters
+TOTAL length (caption + hashtags): under 180 characters
 
 OUTPUT EXACTLY:
 
@@ -130,20 +145,56 @@ def open_browser(url):
     return False
 
 def copy_to_clipboard(text):
-    for attempt in range(2):
+    expected = (text or "").strip()
+    if not expected:
+        return False
+
+    def _normalize(s: str) -> str:
+        return re.sub(r"\s+", " ", (s or "").strip())
+
+    last_err = ""
+    for attempt in range(5):
         try:
             r = subprocess.run(
                 ["termux-clipboard-set"],
-                input=text.strip().encode("utf-8"),
-                timeout=2, capture_output=True
+                input=expected.encode("utf-8"),
+                timeout=4,
+                capture_output=True,
+                check=False,
             )
-            if r.returncode == 0:
-                return True
-        except:
-            pass
-        if attempt == 0:
-            time.sleep(0.5)
-    return True
+            if r.returncode != 0:
+                last_err = (r.stderr or r.stdout or b"")[:120].decode("utf-8", "ignore")
+            else:
+                # Verify if possible.
+                try:
+                    g = subprocess.run(
+                        ["termux-clipboard-get"],
+                        timeout=4,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                    )
+                    if g.returncode == 0:
+                        if _normalize(g.stdout) == _normalize(expected):
+                            return True
+                        last_err = "clipboard verify mismatch"
+                    else:
+                        # Can't verify; treat a successful set as success.
+                        return True
+                except FileNotFoundError:
+                    return True
+                except Exception as e:
+                    last_err = str(e)[:80]
+        except FileNotFoundError:
+            last_err = "termux-clipboard-set not found"
+            break
+        except Exception as e:
+            last_err = str(e)[:80]
+
+        time.sleep(0.25 + attempt * 0.15)
+
+    print(f"⚠️ Clipboard copy failed: {last_err}")
+    return False
 
 def load_api_key():
     with open(KEY_FILE) as f:
@@ -237,7 +288,7 @@ def can_extract_frame(video_path):
     try:
         r = subprocess.run(
             [
-                "ffmpeg", "-v", "error",
+                "ffmpeg", "-nostdin", "-v", "error",
                 "-i", video_path,
                 "-map", "0:v:0",
                 "-frames:v", "1",
@@ -369,7 +420,7 @@ def generate_thumbnails(videos):
         if not success:
             try:
                 subprocess.run([
-                    "ffmpeg", "-y", "-ss", "1", "-i", vpath,
+                    "ffmpeg", "-nostdin", "-y", "-ss", "1", "-i", vpath,
                     "-vframes", "1", "-q:v", "3", "-vf", "scale=320:-1",
                     thumb_path
                 ], capture_output=True, timeout=15, check=False)
@@ -382,7 +433,7 @@ def generate_thumbnails(videos):
             try:
                 seek = max(0.5, get_duration(vpath) * 0.1)
                 subprocess.run([
-                    "ffmpeg", "-y", "-ss", str(seek), "-i", vpath,
+                    "ffmpeg", "-nostdin", "-y", "-ss", str(seek), "-i", vpath,
                     "-vframes", "1", "-q:v", "3", "-vf", "scale=320:-1",
                     thumb_path
                 ], capture_output=True, timeout=15, check=False)
@@ -394,7 +445,7 @@ def generate_thumbnails(videos):
         if not success:
             try:
                 subprocess.run([
-                    "ffmpeg", "-y", "-i", vpath,
+                    "ffmpeg", "-nostdin", "-y", "-i", vpath,
                     "-vframes", "1", "-q:v", "5", thumb_path
                 ], capture_output=True, timeout=15, check=False)
                 success = os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 500
@@ -431,7 +482,7 @@ def _extract_frames(vpath, duration):
             pass
         try:
             subprocess.run([
-                "ffmpeg", "-y", "-ss", str(seek), "-i", vpath,
+                "ffmpeg", "-nostdin", "-y", "-ss", str(seek), "-i", vpath,
                 "-vframes", "1", "-q:v", "3", "-vf", "scale=640:-1",
                 out_path
             ], capture_output=True, timeout=15, check=False)
@@ -447,7 +498,7 @@ def _extract_frames(vpath, duration):
             pass
         try:
             subprocess.run([
-                "ffmpeg", "-y", "-i", vpath,
+                "ffmpeg", "-nostdin", "-y", "-i", vpath,
                 "-vframes", "1", "-q:v", "5", "-vf", "scale=640:-1",
                 out_path
             ], capture_output=True, timeout=15, check=False)
@@ -469,7 +520,7 @@ def _extract_audio(vpath):
         os.remove(TEMP_AUDIO)
     try:
         subprocess.run([
-            "ffmpeg", "-y", "-i", vpath,
+            "ffmpeg", "-nostdin", "-y", "-i", vpath,
             "-vn", "-ar", "16000", "-ac", "1", "-b:a", "32k",
             TEMP_AUDIO
         ], capture_output=True, timeout=30, check=False)
@@ -543,7 +594,97 @@ def generate_caption(api_key, frame_paths, audio_ok):
     raise ValueError("Gemini rate limit")
 
 def format_result(raw):
-    """Parse CAPTION + HASHTAGS, enforce 150 char total."""
+    """Parse CAPTION + HASHTAGS, enforce 180 char total."""
+
+    def _count_emojis(text: str) -> int:
+        # Best-effort emoji count (kept intentionally simple).
+        emoji_re = re.compile(
+            r"[\U0001F1E6-\U0001F1FF\U0001F300-\U0001FAFF\u2600-\u26FF\u2700-\u27BF]",
+            flags=re.UNICODE,
+        )
+        return len(emoji_re.findall(text))
+
+    def _limit_emojis(text: str, max_emojis: int) -> str:
+        emoji_re = re.compile(
+            r"[\U0001F1E6-\U0001F1FF\U0001F300-\U0001FAFF\u2600-\u26FF\u2700-\u27BF]",
+            flags=re.UNICODE,
+        )
+        skin_tone_re = re.compile(r"[\U0001F3FB-\U0001F3FF]", flags=re.UNICODE)
+
+        kept = []
+        emoji_count = 0
+        for ch in text:
+            # Keep joiners/modifiers/variation selectors so we don't break emoji sequences.
+            if ch in ("\u200d", "\ufe0f") or skin_tone_re.match(ch):
+                kept.append(ch)
+                continue
+            if emoji_re.match(ch):
+                if emoji_count >= max_emojis:
+                    continue
+                emoji_count += 1
+            kept.append(ch)
+        return "".join(kept)
+
+    def _enforce_emoji_quota(
+        caption: str,
+        *,
+        min_emojis: int = 2,
+        max_emojis: int = 3,
+        max_len: int = 130,
+    ) -> str:
+        caption = caption.strip()
+
+        # De-script: strip common "scripted" lead-ins if present.
+        caption = re.sub(
+            r"^\s*(?:nah\b|this is (?:crazy|wild)\b|can\s*'?t\s+believe\b)\s*[,:.!-]*\s*",
+            "",
+            caption,
+            flags=re.IGNORECASE,
+        )
+        caption = re.sub(r"^\s*[—\-–]+\s*", "", caption).strip()
+        if caption:
+            caption = caption[0].upper() + caption[1:]
+
+        # Cap length first so we don't exceed guardrails.
+        if len(caption) > max_len:
+            caption = caption[:max_len].rsplit(" ", 1)[0].strip()
+
+        # If too many emojis, drop extras.
+        caption = _limit_emojis(caption, max_emojis)
+
+        fillers = ["😳", "👀", "🚨"]
+        emoji_count = _count_emojis(caption)
+
+        # If too few emojis, add a couple generic ones.
+        for filler in fillers:
+            if emoji_count >= min_emojis:
+                break
+
+            candidate = (caption + (" " if caption else "") + filler).strip()
+            if len(candidate) <= max_len:
+                caption = candidate
+                emoji_count = _count_emojis(caption)
+                continue
+
+            # If we're tight on space, shorten by one word and retry.
+            if " " in caption:
+                shorter = caption.rsplit(" ", 1)[0].strip()
+            else:
+                shorter = caption[: max(0, max_len - 2)].strip()
+
+            candidate = (shorter + (" " if shorter else "") + filler).strip()
+            if shorter and len(candidate) <= max_len:
+                caption = candidate
+                emoji_count = _count_emojis(caption)
+            else:
+                break
+
+        # Re-apply emoji cap + length guard after edits.
+        caption = _limit_emojis(caption, max_emojis)
+        if len(caption) > max_len:
+            caption = caption[:max_len].rsplit(" ", 1)[0].strip()
+        return caption
+
     try:
         if "CAPTION:" in raw and "HASHTAGS:" in raw:
             caption  = raw.split("HASHTAGS:")[0].replace("CAPTION:", "").strip()
@@ -555,8 +696,7 @@ def format_result(raw):
             caption = re.sub(r"\bnewsbreak\b", "", caption, flags=re.IGNORECASE)
             caption = re.sub(r"\s+([?.!,])", r"\1", caption)
             caption = re.sub(r"\s{2,}", " ", caption).strip()
-            if len(caption) > 100:
-                caption = caption[:100].rsplit(" ", 1)[0].strip()
+            caption = _enforce_emoji_quota(caption, max_len=130)
 
             # Hashtag sanitation: drop platform/app + low-signal filler, enforce required tags
             raw_tags = re.findall(r"#\w+", hashtags.lower())
@@ -607,12 +747,12 @@ def format_result(raw):
             hashtags = " ".join(clean_tags)
 
             combined = f"{caption} {hashtags}"
-            if len(combined) > 150:
-                combined = combined[:150].rsplit(" ", 1)[0]
+            if len(combined) > 180:
+                combined = combined[:180].rsplit(" ", 1)[0]
             return combined.strip()
     except:
         pass
-    return raw[:150].rsplit(" ", 1)[0] if len(raw) > 150 else raw
+    return raw[:180].rsplit(" ", 1)[0] if len(raw) > 180 else raw
 
 # ── Web UI ────────────────────────────────────────────────
 def build_html(videos):
@@ -691,23 +831,46 @@ async function pick(i) {{
   msg.textContent  = 'Processing...';
   step.textContent = 'Extracting frames & audio...';
   try {{
-    await fetch('/pick?i=' + i);
-    const ticker = setInterval(() => {{ step.textContent = 'Generating caption...'; }}, 6000);
-    const result = await fetch('/status').then(r => r.text());
-    clearInterval(ticker);
-    if (result === 'done') {{
-      spin.style.display = 'none';
-      msg.textContent  = 'Copied!';
-      step.textContent = 'Pick next video';
-      setTimeout(() => {{
-        ov.classList.remove('show');
-        spin.style.display = 'block';
-      }}, 1600);
-    }} else {{
-      msg.textContent  = 'Error - try again';
-      step.textContent = '';
-      setTimeout(() => ov.classList.remove('show'), 2500);
-    }}
+        const pickResp = await fetch('/pick?i=' + i);
+        if (!pickResp.ok) throw new Error('Pick failed');
+
+        let tries = 0;
+        const maxTries = 160; // ~2 minutes at 750ms
+        while (tries++ < maxTries) {{
+            const st = await fetch('/status').then(r => r.json());
+            const stage = (st && st.stage) ? st.stage : 'unknown';
+            const detail = (st && st.detail) ? st.detail : '';
+
+            if (stage === 'done') {{
+                spin.style.display = 'none';
+                msg.textContent  = 'Copied!';
+                step.textContent = 'Pick next video';
+                setTimeout(() => {{
+                    ov.classList.remove('show');
+                    spin.style.display = 'block';
+                }}, 1600);
+                return;
+            }}
+
+            if (stage === 'error') {{
+                msg.textContent  = 'Error - try again';
+                step.textContent = detail ? detail : '';
+                setTimeout(() => ov.classList.remove('show'), 3000);
+                return;
+            }}
+
+            if (stage === 'queued') step.textContent = 'Queued...';
+            else if (stage === 'extracting') step.textContent = 'Extracting frames & audio...';
+            else if (stage === 'generating') step.textContent = 'Generating caption...';
+            else if (stage === 'idle') step.textContent = 'Waiting...';
+            else step.textContent = (detail || 'Processing...');
+
+            await new Promise(r => setTimeout(r, 750));
+        }}
+
+        msg.textContent  = 'Timed out - try again';
+        step.textContent = '';
+        setTimeout(() => ov.classList.remove('show'), 2500);
   }} catch(e) {{
     msg.textContent  = 'Error - try again';
     step.textContent = '';
@@ -737,7 +900,7 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        global selected_video, caption_ready
+        global selected_video, caption_ready, processing_stage, processing_detail
         try:
             parsed = urlparse(self.path)
 
@@ -750,26 +913,42 @@ class Handler(BaseHTTPRequestHandler):
 
             elif parsed.path == "/pick":
                 idx = int(parse_qs(parsed.query).get("i", [0])[0])
-                with processing_lock:
-                    caption_ready.clear()
-                    Handler.error_occurred = False
-                    selected_video = self.videos[idx]
-                self.send_response(200)
-                self.send_header("Content-Type", "text/plain")
-                self.end_headers()
-                self.wfile.write(b"ok")
+                if idx < 0 or idx >= len(self.videos):
+                    set_processing_stage("error", "Bad selection index")
+                    Handler.error_occurred = True
+                    caption_ready.set()
+                    self.send_response(400)
+                    self.send_header("Content-Type", "text/plain")
+                    self.end_headers()
+                    self.wfile.write(b"bad index")
+                else:
+                    with processing_lock:
+                        caption_ready.clear()
+                        Handler.error_occurred = False
+                        selected_video = self.videos[idx]
+                        processing_stage = "queued"
+                        processing_detail = ""
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/plain")
+                    self.end_headers()
+                    self.wfile.write(b"ok")
 
             elif parsed.path == "/status":
-                ready = caption_ready.wait(timeout=120)
+                # Non-blocking status endpoint for better debugging.
+                with processing_lock:
+                    stage = processing_stage
+                    detail = processing_detail
+                    err = Handler.error_occurred
+
+                payload = {
+                    "stage": "error" if err else stage,
+                    "detail": detail,
+                }
+
                 self.send_response(200)
-                self.send_header("Content-Type", "text/plain")
+                self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                if Handler.error_occurred:
-                    self.wfile.write(b"error")
-                elif ready:
-                    self.wfile.write(b"done")
-                else:
-                    self.wfile.write(b"timeout")
+                self.wfile.write(json.dumps(payload).encode("utf-8"))
 
             else:
                 self.send_response(404)
@@ -783,7 +962,7 @@ class Handler(BaseHTTPRequestHandler):
 
 # ── Main ──────────────────────────────────────────────────
 def main():
-    global selected_video
+    global selected_video, processing_stage, processing_detail
 
     try:
         api_key = load_api_key()
@@ -834,6 +1013,9 @@ def main():
             selected_video = None
             caption_ready.clear()
             Handler.error_occurred = False
+            # Don't reset stage/detail here.
+            # If we immediately reset from "done" → "idle", the web UI can miss
+            # the "done" state and keep showing the processing overlay.
 
         while selected_video is None:
             time.sleep(0.2)
@@ -841,21 +1023,28 @@ def main():
         current = selected_video
 
         try:
+            set_processing_stage("extracting")
             toast("Extracting...")
             frame_paths, audio_ok = extract_parallel(current)
 
             if not frame_paths:
                 raise ValueError("Could not extract frames")
 
+            set_processing_stage("generating")
             toast("Generating caption...")
             raw    = generate_caption(api_key, frame_paths, audio_ok)
             result = format_result(raw)
 
             print(f"\n{result}\n")
-            copy_to_clipboard(result)
-
-            toast("Copied!")
-            notify("Ready", "Caption copied", "nb_status")
+            if copy_to_clipboard(result):
+                toast("Copied!")
+                notify("Ready", "Caption copied", "nb_status")
+                set_processing_stage("done")
+            else:
+                toast("Clipboard failed")
+                notify("Error", "Clipboard failed (caption printed in terminal)", "nb_status")
+                Handler.error_occurred = True
+                set_processing_stage("error", "Clipboard failed")
             caption_ready.set()
 
         except Exception as e:
@@ -864,6 +1053,7 @@ def main():
             toast(f"Error: {err[:50]}")
             notify("Error", err, "nb_status")
             Handler.error_occurred = True
+            set_processing_stage("error", err)
             caption_ready.set()
 
         finally:
