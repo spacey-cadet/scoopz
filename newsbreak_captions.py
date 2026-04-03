@@ -35,21 +35,25 @@ caption_ready   = threading.Event()
 processing_lock = threading.Lock()
 
 # ── Prompt ───────────────────────────────────────────────
-CAPTION_PROMPT = """You are a viral caption writer for a hyperlocal news page.
+CAPTION_PROMPT = """You are a viral content creator posting a video to a local community news page.
 
 I'm giving you:
 1. Two frames from the video (at 10% and 50% of its duration)
 2. The audio from the video — listen carefully to what is being said
 
-Your job: write a caption that stops people mid-scroll.
+Your job: write a caption that stops people mid-scroll by sounding like a real human reacting to what's happening.
 
 CAPTION RULES:
-- 1-2 sentences, punchy, present tense ("Watch as...", "Caught on camera...")
-- 1-3 emojis placed naturally inline — not dumped at the end
-- Use full location names if you can detect them (e.g. "Downtown Detroit" not "the area")
-- NO hashtags inside the caption body
-- NEVER use the words "NewsBreak", "TikTok", "App", or "Platform" in the caption text
-- Caption itself: under 100 characters
+- 1-2 sentences, highly conversational, punchy.
+- Write from a FIRST-PERSON perspective ("I", "we", "my", "our").
+- Example: Instead of "The Artemis takes off to the moon," write "We're finally going back to the moon! 🚀" 
+- Example: Instead of "A fire breaks out downtown," write "I can't believe how crazy this fire downtown is right now."
+- AVOID news anchor cliches ("Watch as...", "Caught on camera...", "Breaking:").
+- 1-3 emojis placed naturally inline — not dumped at the end.
+- Use full location names if you can detect them (e.g. "Downtown Detroit").
+- NO hashtags inside the caption body.
+- NEVER use the words "NewsBreak", "TikTok", "App", or "Platform" in the caption text.
+- Caption itself: under 100 characters.
 
 HASHTAG RULES:
 - 4-6 tags, all lowercase
@@ -229,10 +233,6 @@ def load_videos():
 
 # ── Thumbnails (Strict Filtering) ─────────────────────────
 def generate_thumbnails(videos):
-    """
-    Attempts to generate thumbnails. 
-    If a video fails (corrupted/trashed), it is dropped entirely.
-    """
     os.makedirs(THUMB_DIR, exist_ok=True)
     valid_names = {os.path.basename(v) for v in videos}
     
@@ -258,14 +258,12 @@ def generate_thumbnails(videos):
         name       = os.path.basename(vpath)
         thumb_path = os.path.join(THUMB_DIR, name + ".jpg")
 
-        # Check if good thumbnail already exists
         if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 500:
             readable_videos.append(vpath)
             continue
 
         success = False
 
-        # Strategy 1: seek 1s
         if not success:
             try:
                 subprocess.run([
@@ -277,7 +275,6 @@ def generate_thumbnails(videos):
             except:
                 pass
 
-        # Strategy 2: seek to 10% duration
         if not success:
             try:
                 seek = max(0.5, get_duration(vpath) * 0.1)
@@ -290,7 +287,6 @@ def generate_thumbnails(videos):
             except:
                 pass
 
-        # Strategy 3: first frame
         if not success:
             try:
                 subprocess.run([
@@ -301,7 +297,6 @@ def generate_thumbnails(videos):
             except:
                 pass
 
-        # Strict Filter: If all 3 methods failed, the file is trash. Drop it.
         if success:
             readable_videos.append(vpath)
         else:
@@ -611,7 +606,6 @@ def main():
         print("\n📂 0 videos found in gallery. Add some videos and run again.\n")
         sys.exit(1)
 
-    # STRICT FILTERING: Re-assign videos to ONLY the ones that survived thumbnail generation
     videos = generate_thumbnails(videos)
     
     if not videos:
