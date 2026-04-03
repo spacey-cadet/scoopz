@@ -17,7 +17,7 @@ from urllib.parse import urlparse, parse_qs
 
 # ── Config ───────────────────────────────────────────────
 KEY_FILE     = os.path.expanduser("~/.config/gemini_key.txt")
-GEMINI_MODEL = "gemini-2.5-flash-lite"  # FIXED: Use stable model
+GEMINI_MODEL = "gemini-2.5-flash-lite"
 GEMINI_BASE  = "https://generativelanguage.googleapis.com/v1beta/models"
 
 SCOOPZ_DIR   = "/sdcard/Pictures/scoopz"
@@ -35,7 +35,7 @@ caption_ready   = threading.Event()
 processing_lock = threading.Lock()
 
 # ── Prompt ───────────────────────────────────────────────
-CAPTION_PROMPT = """You are a viral caption writer for NewsBreak — a hyperlocal news app.
+CAPTION_PROMPT = """You are a viral caption writer for a hyperlocal news page.
 
 I'm giving you:
 1. Two frames from the video (at 10% and 50% of its duration)
@@ -48,15 +48,15 @@ CAPTION RULES:
 - 1-3 emojis placed naturally inline — not dumped at the end
 - Use full location names if you can detect them (e.g. "Downtown Detroit" not "the area")
 - NO hashtags inside the caption body
+- NEVER use the words "NewsBreak", "TikTok", "App", or "Platform" in the caption text
 - Caption itself: under 100 characters
 
 HASHTAG RULES:
 - 4-6 tags, all lowercase
-- Always include #newsbreak
 - Always include one of: #breakingnews or #localnews
 - Add a location tag if detectable (e.g. #chicago #miami #houston)
 - Add 1-2 specific topic tags (e.g. #caraccident #flooding #protest #arrest #fire)
-- NEVER use: #newsbreakapp #newsbreak #nb #viral #fyp #foryou #trending or any vague filler tags
+- NEVER use: #newsbreak #newsbreakapp #nb #tiktok #viral #fyp #foryou #trending or any vague filler tags
 
 TOTAL length (caption + space + hashtags): 150 characters max.
 
@@ -118,20 +118,20 @@ def open_browser(url):
     return False
 
 def copy_to_clipboard(text):
-    for attempt in range(2):
+    """Retries clipboard injection to bypass Android background limits."""
+    for attempt in range(4):
         try:
             r = subprocess.run(
                 ["termux-clipboard-set"],
                 input=text.strip().encode("utf-8"),
-                timeout=2, capture_output=True
+                timeout=3, capture_output=True
             )
             if r.returncode == 0:
                 return True
         except:
             pass
-        if attempt == 0:
-            time.sleep(0.5)
-    return True
+        time.sleep(1.0)
+    return False
 
 def load_api_key():
     with open(KEY_FILE) as f:
@@ -155,8 +155,8 @@ def kill_port(port):
                 with open(tcp_file) as f:
                     for line in f:
                         parts = line.split()
-                        if len(parts) > 9 and parts[1].endswith(":" + port_hex):
-                            inode = parts[9]
+                        if len(parts) > 9 and parts.endswith(":" + port_hex):
+                            inode = parts
                             break
             except:
                 pass
@@ -167,7 +167,7 @@ def kill_port(port):
                 try:
                     link = os.readlink(fd_path)
                     if f"socket:[{inode}]" in link:
-                        os.kill(int(fd_path.split("/")[2]), 9)
+                        os.kill(int(fd_path.split("/")), 9)
                         break
                 except:
                     pass
@@ -201,52 +201,51 @@ def get_duration(video_path):
         return 30.0
 
 # ── Video loader (MediaStore-filtered) ───────────────────
-def mediastore_paths():
-    """Get all video paths Android's MediaStore knows about."""
+def mediastore_filenames():
+    """Returns set of valid Gallery filenames, or None if the query fails completely."""
     try:
         r = subprocess.run([
             "content", "query",
             "--uri", "content://media/external/video/media",
             "--projection", "_data",
         ], capture_output=True, timeout=10, text=True, check=False)
-        paths = set()
+        
+        if r.returncode != 0:
+            return None
+            
+        names = set()
         for line in r.stdout.splitlines():
             if "_data=" in line:
-                path = line.split("_data=", 1)[1].strip()
-                paths.add(path)
-        return paths
+                path = line.split("_data=", 1).strip()
+                names.add(os.path.basename(path))
+        return names
     except:
-        return set()
+        return None
 
 def load_videos():
-    """
-    Return videos from SCOOPZ_DIR that:
-    1. Exist as files
-    2. Are in MediaStore (not deleted from Google Photos)
-    """
+    """Load valid videos, strictly enforcing Gallery state."""
+    if not os.path.exists(SCOOPZ_DIR):
+        return []
+
     all_files = [
         os.path.join(SCOOPZ_DIR, f)
         for f in os.listdir(SCOOPZ_DIR)
         if f.lower().endswith(".mp4") and not f.startswith(".")
     ]
     
-    # Filter: only files that actually exist
-    existing = [v for v in all_files if os.path.exists(v)]
+    # Filter 1: Must physically exist AND be larger than 1KB (ignores ghost/trashed 0-byte files)
+    existing = [v for v in all_files if os.path.exists(v) and os.path.getsize(v) > 1024]
     
-    # Filter: only files MediaStore knows about
-    known = mediastore_paths()
+    # Filter 2: Cross-reference with MediaStore
+    known_names = mediastore_filenames()
     
-    if not known:
-        # MediaStore unavailable - show all existing files
-        filtered = existing
-    else:
-        # Only show files that are in MediaStore (not deleted from gallery)
-        filtered = [v for v in existing if v in known]
-    
-    # Sort by modification time, newest first
-    filtered.sort(key=os.path.getmtime, reverse=True)
-    
-    return filtered
+    # If known_names is None, the query crashed. If it's [], the gallery is empty.
+    if known_names is not None:
+        # STRICT FILTER: Only keep files that are officially registered in the gallery.
+        existing = [v for v in existing if os.path.basename(v) in known_names]
+        
+    existing.sort(key=os.path.getmtime, reverse=True)
+    return existing
 
 # ── Thumbnails (FIXED: only for valid videos) ────────────
 def generate_thumbnails(videos):
@@ -444,7 +443,7 @@ def generate_caption(api_key, frame_paths, audio_ok):
         if not resp.ok:
             print(f"Gemini error {resp.status_code}: {resp.text[:300]}")
         resp.raise_for_status()
-        return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        return resp.json()["candidates"]["content"]["parts"]["text"].strip()
 
     raise ValueError("Gemini rate limit")
 
@@ -452,15 +451,15 @@ def format_result(raw):
     """Parse CAPTION + HASHTAGS, enforce 150 char total."""
     try:
         if "CAPTION:" in raw and "HASHTAGS:" in raw:
-            caption  = raw.split("HASHTAGS:")[0].replace("CAPTION:", "").strip()
-            hashtags = raw.split("HASHTAGS:")[1].strip().split("\n")[0].strip()
+            caption  = raw.split("HASHTAGS:").replace("CAPTION:", "").strip()
+            hashtags = raw.split("HASHTAGS:").strip().split("\n").strip()
             combined = f"{caption} {hashtags}"
             if len(combined) > 150:
-                combined = combined[:150].rsplit(" ", 1)[0]
+                combined = combined[:150].rsplit(" ", 1)
             return combined.strip()
     except:
         pass
-    return raw[:150].rsplit(" ", 1)[0] if len(raw) > 150 else raw
+    return raw[:150].rsplit(" ", 1) if len(raw) > 150 else raw
 
 # ── Web UI ────────────────────────────────────────────────
 def build_html(videos):
@@ -593,11 +592,15 @@ class Handler(BaseHTTPRequestHandler):
                 body = build_html(self.videos).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "text/html")
+                # ANTI-CACHE HEADERS
+                self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+                self.send_header("Pragma", "no-cache")
+                self.send_header("Expires", "0")
                 self.end_headers()
                 self.wfile.write(body)
 
             elif parsed.path == "/pick":
-                idx = int(parse_qs(parsed.query).get("i", [0])[0])
+                idx = int(parse_qs(parsed.query).get("i",))
                 with processing_lock:
                     caption_ready.clear()
                     Handler.error_occurred = False
@@ -647,9 +650,10 @@ def main():
 
     if not videos:
         toast("No videos found!")
+        print("\n📂 0 videos found in gallery. Add some videos and run again.\n")
         sys.exit(1)
 
-    print(f"📹 Found {len(videos)} videos in gallery")
+    print(f"📹 Found {len(videos)} valid videos")
     generate_thumbnails(videos)
     Handler.videos = videos
 
