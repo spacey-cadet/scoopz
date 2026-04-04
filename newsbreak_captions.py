@@ -48,48 +48,51 @@ def set_processing_stage(stage: str, detail: str = ""):
         processing_detail = detail
 
 # ── Prompt ───────────────────────────────────────────────
-CAPTION_PROMPT = """You are a real person on the scene reacting to something happening in your area.
+CAPTION_PROMPT = """You are writing a punchy, social caption reacting to what the video shows and what the audio captures.
 
-You're NOT a news reporter. You're NOT a brand. You're just a local who pulled out their phone to record this.
+You're NOT a news reporter. You're NOT a brand.
 
 I'm giving you:
-1. Two frames from the video
-2. The audio from the video
+1) Two frames from the video
+2) The audio from the video
 
 Your job: Write a caption that stops people mid-scroll by sounding raw, observant, and deeply local.
 
 CAPTION RULES:
-- 1–2 short sentences max. Under 130 characters.
-- Voice: First-person ("I", "we", "my") or immediate observation ("nah this is crazy", "can't believe this").
-- Avoid stock/opening phrases that feel scripted. Do NOT start the caption with: "nah", "this is crazy", "this is wild", "can't believe".
+- Length: ~180 characters total (aim 170–195 characters).
+- Structure: 2 sentences, each ~15–25 characters.
+- POV: VARY FIRST PERSON, SECOND PERSON, THIRD PERSON from caption to caption.
+    - Do not use: I, I'm, I've, me, my, mine, we, we're, our, ours, us.
+    - Alternate caption-by-caption between THIRD PERSON and SECOND PERSON.
+    - Include at least one direct question in SECOND PERSON.
 - Start with the concrete detail first (what/where), then the reaction.
-- Be Hyper-Specific: Instead of "a fire in the city," use exact details if visible/audible. Mention specific neighborhoods, street names, subway lines, or intersections if you detect them (e.g., "Washington Square Park", "the FDR", "Downtown").
-- Slightly more complete than a one-liner: include (1) what’s happening + (2) where it is (if you can tell) + (3) your reaction.
-- Sensory Focus: React to the intensity. How loud is it? How massive is the crowd? How bad is the traffic? Focus on the immediate vibe.
-- Examples of the exact tone to use:
-    - "Traffic on the BQE is completely cooked right now 🚗😩"
-    - "Can't even hear myself think over these sirens outside the bodega 🚨😳"
-    - "Rain is coming down sideways right now, stay inside 🌧️😬"
-    - "Knicks game was an absolute movie tonight 🏀🔥"
-- Don't invent details you aren't 100% sure about from the media.
-- NO news-anchor phrases ("watch as", "caught on camera", "breaking:").
-- NO brand mentions (no app names, no platforms). Do NOT say "newsbreak" or "tiktok".
-- Use 2–3 emojis max, placed naturally inline.
+- Be hyper-specific only when the media supports it (signage, uniforms, landmarks, street names, train lines, sirens, chants, etc.).
+- Sensory focus: volume, movement, vibe, traffic, smoke, weather, crowd, etc.
+- Avoid scripted openings. Do NOT start the caption with: "nah", "this is crazy", "this is wild", "can't believe".
+- Don't invent details you aren't 100% sure about from the frames/audio.
+- No news-anchor phrasing ("watch as", "caught on camera", "breaking:").
+- No brand/platform mentions (do NOT say "newsbreak", "tiktok", etc.).
+- Emojis: 1–3 max, used naturally.
+- If the audio is mostly background music, prioritize what the frames show; use the music only to set the mood.
+
+STYLE EXAMPLES (do NOT copy wording; only match the vibe and structure):
+- "Cole just said the quiet part out loud about the rap game, and now everybody’s acting shocked. Do you agree, or is this just a rollout? 😳"
+- "He’s calling out the whole industry like it’s nothing, and the room got real quiet real fast. Would you back this take, or is it reaching?"
+- "They keep saying it’s ‘competition,’ but the way this is moving looks way deeper than that. If you’re watching this, what side are you on? 👀"
+- "She just put a timeline on what’s been happening behind the scenes, and it’s hard to un-hear it once it clicks. Do you buy it, yes or no?"
+- "The crowd is reacting like a nerve got touched, not like a normal hot take. If you’ve been paying attention, does this feel like the truth to you?"
 
 HASHTAGS RULES:
 - 4–5 tags only, all lowercase.
 - Include ONE of: #breakingnews or #localnews
-- Include the specific location/neighborhood if obvious (e.g., #brooklyn, #harlem, #nyc).
-- Include 1–2 highly specific topic tags (e.g., #gridlock, #subway, #flooding, #blockparty).
-- Avoid generic filler (#news, #update, #live).
-- NO platform tags (#viral, #fyp, #newsbreak).
-
-TOTAL length (caption + hashtags): under 180 characters
+- Include the specific location/neighborhood if obvious.
+- Include 1–2 topic tags that fit what you can actually see/hear.
+- Avoid generic filler (#news, #update, #live) and platform tags (#viral, #fyp, #newsbreak #tiktok #instagram #youtube #tok).
 
 OUTPUT EXACTLY:
 
 CAPTION:
-caption text
+<caption text>
 
 HASHTAGS:
 #tag1 #tag2 #tag3 #tag4"""
@@ -583,7 +586,7 @@ def generate_caption(api_key, frame_paths, audio_ok):
         "contents": [{"parts": parts}],
         "generationConfig": {
             "temperature": 1.0,
-            "maxOutputTokens": 220
+            "maxOutputTokens": 520
         }
     }
 
@@ -606,7 +609,85 @@ def generate_caption(api_key, frame_paths, audio_ok):
     raise ValueError("Gemini rate limit")
 
 def format_result(raw):
-    """Parse CAPTION + HASHTAGS, enforce 180 char total."""
+    """Parse CAPTION + HASHTAGS and sanitize output.
+
+    This tool used to enforce a short ~180 *character* caption. We now target a
+    longer caption (~180 *words*) while keeping the same CAPTION/HASHTAGS format.
+    """
+
+    def _word_count(text: str) -> int:
+        # Counts word-like tokens; keeps it simple and fast.
+        return len(re.findall(r"\b[\w']+\b", text or ""))
+
+    def _split_sentences(text: str) -> list[str]:
+        text = (text or "").strip()
+        if not text:
+            return []
+        # Best-effort sentence splitter.
+        parts = re.split(r"(?<=[.!?])\s+", text)
+        return [p.strip() for p in parts if p.strip()]
+
+    def _contains_first_person(text: str) -> bool:
+        fp = re.compile(
+            r"\b(i|i'm|im|i’ve|i've|me|my|mine|we|we're|were|our|ours|us)\b",
+            flags=re.IGNORECASE,
+        )
+        return bool(fp.search(text or ""))
+
+    def _strip_first_person_sentences(text: str) -> str:
+        sentences = _split_sentences(text)
+        if not sentences:
+            return (text or "").strip()
+        kept = [s for s in sentences if not _contains_first_person(s)]
+        return " ".join(kept).strip() if kept else (text or "").strip()
+
+    def _repair_first_person_pronouns(text: str) -> str:
+        # Last resort: rewrite pronouns if any first-person remains.
+        replacements = [
+            (r"\bI\b", "They"),
+            (r"\bI['’]m\b", "They're"),
+            (r"\bI['’]ve\b", "They've"),
+            (r"\bme\b", "them"),
+            (r"\bmy\b", "their"),
+            (r"\bmine\b", "theirs"),
+            (r"\bwe\b", "they"),
+            (r"\bwe['’]re\b", "they're"),
+            (r"\bour\b", "their"),
+            (r"\bours\b", "theirs"),
+            (r"\bus\b", "them"),
+        ]
+        out = text or ""
+        for pat, rep in replacements:
+            out = re.sub(pat, rep, out)
+        out = re.sub(r"^\s*they\b", "They", out, flags=re.IGNORECASE)
+        out = re.sub(r"\s{2,}", " ", out).strip()
+        return out
+
+    def _trim_to_max_words(text: str, max_words: int) -> str:
+        text = (text or "").strip()
+        if _word_count(text) <= max_words:
+            return text
+
+        sentences = _split_sentences(text)
+        if len(sentences) >= 2:
+            kept = []
+            for sent in sentences:
+                candidate = (" ".join(kept + [sent])).strip()
+                if _word_count(candidate) > max_words:
+                    break
+                kept.append(sent)
+            if kept:
+                return " ".join(kept).strip()
+
+        # Fallback: hard word trim.
+        words = text.split()
+        trimmed = " ".join(words[:max_words]).strip()
+
+        # Prefer ending on a sentence boundary if we have one.
+        last_end = max(trimmed.rfind("."), trimmed.rfind("!"), trimmed.rfind("?"))
+        if last_end >= 0 and last_end >= int(len(trimmed) * 0.6):
+            trimmed = trimmed[: last_end + 1].strip()
+        return trimmed
 
     def _count_emojis(text: str) -> int:
         # Best-effort emoji count (kept intentionally simple).
@@ -699,7 +780,7 @@ def format_result(raw):
 
     try:
         if "CAPTION:" in raw and "HASHTAGS:" in raw:
-            caption  = raw.split("HASHTAGS:")[0].replace("CAPTION:", "").strip()
+            caption = raw.split("HASHTAGS:")[0].replace("CAPTION:", "").strip()
             hashtags = raw.split("HASHTAGS:")[1].strip().split("\n")[0].strip()
             hashtags = hashtags.strip().strip("[](){}")
 
@@ -708,9 +789,21 @@ def format_result(raw):
             caption = re.sub(r"\bnewsbreak\b", "", caption, flags=re.IGNORECASE)
             caption = re.sub(r"\s+([?.!,])", r"\1", caption)
             caption = re.sub(r"\s{2,}", " ", caption).strip()
-            caption = _enforce_emoji_quota(caption, max_len=130)
 
-            # Hashtag sanitation: drop platform/app + low-signal filler, enforce required tags
+            # De-script + emoji cap, but don't force any minimum emojis.
+            caption = _enforce_emoji_quota(caption, min_emojis=0, max_emojis=3, max_len=2000)
+
+            # Enforce: no first person in final output.
+            if _contains_first_person(caption):
+                caption = _strip_first_person_sentences(caption)
+            if _contains_first_person(caption):
+                caption = _repair_first_person_pronouns(caption)
+
+            # Length guard: keep caption near the requested range if it runs long.
+            # (We can't reliably expand a too-short model output here.)
+            caption = _trim_to_max_words(caption, 195)
+
+            # Hashtag sanitation: drop platform/app + low-signal filler, enforce required tag
             raw_tags = re.findall(r"#\w+", hashtags.lower())
             banned_platform = {
                 "#newsbreak",
@@ -742,29 +835,18 @@ def format_result(raw):
                 clean_tags.append("#localnews")
                 seen.add("#localnews")
 
-            # If we got too strict and ended up with <4 tags, allow a couple generic (non-platform) tags.
-            if len(clean_tags) < 4:
-                for tag in non_banned:
-                    if tag in seen:
-                        continue
-                    if tag not in low_signal:
-                        continue
-                    clean_tags.append(tag)
-                    seen.add(tag)
-                    if len(clean_tags) >= 4:
-                        break
-
-            # Cap to 5 tags
             clean_tags = clean_tags[:5]
-            hashtags = " ".join(clean_tags)
+            hashtags = " ".join(clean_tags).strip()
 
-            combined = f"{caption} {hashtags}"
-            if len(combined) > 180:
-                combined = combined[:180].rsplit(" ", 1)[0]
-            return combined.strip()
+            if hashtags:
+                return f"{caption}\n\n{hashtags}".strip()
+            return caption.strip()
     except:
         pass
-    return raw[:180].rsplit(" ", 1)[0] if len(raw) > 180 else raw
+
+    # Fallback: best-effort cleanup without strict truncation.
+    raw = (raw or "").strip()
+    return raw
 
 # ── Web UI ────────────────────────────────────────────────
 def build_html(videos):
