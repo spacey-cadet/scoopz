@@ -22,6 +22,10 @@ KEY_FILE     = os.path.expanduser("~/.config/gemini_key.txt")
 GEMINI_MODEL = "gemini-2.5-flash-lite"  # FIXED: Use stable model
 GEMINI_BASE  = "https://generativelanguage.googleapis.com/v1beta/models"
 
+# Persist POV alternation across runs (2nd person ↔ 3rd person)
+POV_STATE_FILE = os.path.expanduser("~/.cache/scoopz_caption_pov.json")
+USER_EXAMPLES_FILE = os.path.expanduser("~/.config/scoopz_caption_examples.txt")
+
 SCOOPZ_DIR   = "/sdcard/Pictures/scoopz"
 THUMB_DIR    = "/sdcard/Pictures/scoopz/.thumbs"
 
@@ -48,7 +52,7 @@ def set_processing_stage(stage: str, detail: str = ""):
         processing_detail = detail
 
 # ── Prompt ───────────────────────────────────────────────
-CAPTION_PROMPT = """You are writing a punchy, social caption reacting to what the video shows and what the audio captures.
+CAPTION_PROMPT_TEMPLATE = """You are writing a punchy, social caption reacting to what the video shows and what the audio captures.
 
 You're NOT a news reporter. You're NOT a brand.
 
@@ -58,14 +62,29 @@ I'm giving you:
 
 Your job: Write a caption that stops people mid-scroll by sounding raw, observant, and deeply local.
 
+POV FOR THIS CAPTION: {POV_MODE}
+
 CAPTION RULES:
-- Length: ~180 characters total (aim 170–195 characters).
-- Structure: 2 sentences, each ~15–25 characters.
-- POV: VARY FIRST PERSON, SECOND PERSON, THIRD PERSON from caption to caption.
-    - Do not use: I, I'm, I've, me, my, mine, we, we're, our, ours, us.
-    - Alternate caption-by-caption between THIRD PERSON and SECOND PERSON.
-    - Include at least one direct question in SECOND PERSON.
-- Start with the concrete detail first (what/where), then the reaction.
+- Length: ~200 characters total (aim 170–220 characters), NOT counting hashtags.
+- Structure: 2 sentences.
+- POV:
+    - Follow the POV mode above.
+    - If POV is SECOND PERSON, include at least one direct question ending with a '?'.
+    - If POV is FIRST PERSON (OBSERVER): you may use I / me / my ONLY as commentary.
+        - You are NOT a participant in the scene.
+        - Do NOT claim you did anything in the video (no: "I did", "I made", "I pulled up", "we did", "we're here").
+        - Avoid collective first person (no: we, our, us).
+
+CAPTION STRUCTURE (biggest win):
+- Hook (pattern interrupt) → escalation → personal pull.
+    - Hook: make it sound slightly off / unresolved.
+    - Escalation: imply it could go left / something shifted.
+    - Personal pull: make the viewer choose a side, answer a pointed question, or admit what they'd do.
+
+- Start with a SPECIFIC ANCHOR DETAIL first (named person OR clear object/topic).
+    - If you are confident the audio names a person (e.g. “J Cole”), use the proper name.
+    - If no name is certain, use a concrete noun phrase: "Knife silencer setup...", "Mic check on stage..."
+    - Avoid generic subjects like "this dude", "this guy", "some dude" when anything more specific is available.
 - Be hyper-specific only when the media supports it (signage, uniforms, landmarks, street names, train lines, sirens, chants, etc.).
 - Sensory focus: volume, movement, vibe, traffic, smoke, weather, crowd, etc.
 - Avoid scripted openings. Do NOT start the caption with: "nah", "this is crazy", "this is wild", "can't believe".
@@ -75,27 +94,138 @@ CAPTION RULES:
 - Emojis: 1–3 max, used naturally.
 - If the audio is mostly background music, prioritize what the frames show; use the music only to set the mood.
 
+VIRALITY BOOST RULES:
+- Create a curiosity gap: imply something without fully explaining it.
+- Add tension: make it feel slightly uncomfortable, risky, or unresolved.
+- Avoid obvious descriptions; hint instead of explain.
+- Make the viewer feel like they might miss something important if they scroll.
+- Occasionally use short punchy sentences or a fragment for impact.
+- Prioritize emotional reaction over factual description.
+
+LANGUAGE UPGRADES:
+- Use implication language (pick 1 max):
+    “and that’s when it got weird” / “something about this isn’t adding up” / “the part people are missing is…” / “this could go left fast” / “you can feel something shift here”.
+- Make SECOND PERSON more aggressive/direct:
+    “You’re telling me you’d stay?” / “You walking into this or turning back?” / “Be honest—you’re not ignoring this, right?”
+- Make FIRST PERSON (OBSERVER) sound authoritative:
+    “I’m not gonna lie, this doesn’t sit right” / “I don’t like how quiet that just got” / “I’ve seen this go wrong before”.
+- Tighten emotion words: interesting→off, unusual→not right, surprising→weird, funny→dangerous/familiar/deep.
+
 STYLE EXAMPLES (do NOT copy wording; only match the vibe and structure):
 - "Cole just said the quiet part out loud about the rap game, and now everybody’s acting shocked. Do you agree, or is this just a rollout? 😳"
 - "He’s calling out the whole industry like it’s nothing, and the room got real quiet real fast. Would you back this take, or is it reaching?"
 - "They keep saying it’s ‘competition,’ but the way this is moving looks way deeper than that. If you’re watching this, what side are you on? 👀"
 - "She just put a timeline on what’s been happening behind the scenes, and it’s hard to un-hear it once it clicks. Do you buy it, yes or no?"
 - "The crowd is reacting like a nerve got touched, not like a normal hot take. If you’ve been paying attention, does this feel like the truth to you?"
+- "A knife with a silencer-style rig is the kind of overkill you can’t unsee. Would you ever trust somebody building this? 😳"
+- "J. Cole said it on stage with his chest and the whole vibe shifted fast. Do you think he meant every word?"
+- "I’m watching the room go dead quiet like a nerve just got touched. Are you hearing what he’s really saying? 👀"
 
 HASHTAGS RULES:
 - 4–5 tags only, all lowercase.
 - Include ONE of: #breakingnews or #localnews
 - Include the specific location/neighborhood if obvious.
 - Include 1–2 topic tags that fit what you can actually see/hear.
-- Avoid generic filler (#news, #update, #live) and platform tags (#viral, #fyp, #newsbreak #tiktok #instagram #youtube #tok).
+- Avoid generic filler (#news, #update, #live) and platform tags (#viral, #fyp, #newsbreak #tiktok #instagram #youtube #tok, #catsoftiktok#catsofisntagram) or any tags with the names mentioned.
 
 OUTPUT EXACTLY:
 
+CANDIDATE 1:
 CAPTION:
 <caption text>
+HASHTAGS:
+#tag1 #tag2 #tag3 #tag4
 
+CANDIDATE 2:
+CAPTION:
+<caption text>
+HASHTAGS:
+#tag1 #tag2 #tag3 #tag4
+
+CANDIDATE 3:
+CAPTION:
+<caption text>
 HASHTAGS:
 #tag1 #tag2 #tag3 #tag4"""
+
+
+def _read_json(path: str) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except:
+        return {}
+
+
+def _write_json_atomic(path: str, data: dict) -> None:
+    # Best-effort atomic write (works on Android/Linux).
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    except:
+        pass
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+    try:
+        os.replace(tmp, path)
+    except:
+        try:
+            os.rename(tmp, path)
+        except:
+            pass
+
+
+def next_pov_mode() -> str:
+    """Rotate POV across captions: THIRD → SECOND → FIRST(OBSERVER) → ..."""
+    state = _read_json(POV_STATE_FILE)
+    last = (state.get("last") or "third").strip().lower()
+
+    order = ["third", "second", "first_observer"]
+    try:
+        idx = order.index(last)
+    except ValueError:
+        idx = 0
+    nxt = order[(idx + 1) % len(order)]
+
+    state["last"] = nxt
+    _write_json_atomic(POV_STATE_FILE, state)
+
+    if nxt == "second":
+        return "SECOND PERSON"
+    if nxt == "first_observer":
+        return "FIRST PERSON (OBSERVER)"
+    return "THIRD PERSON"
+
+
+def build_caption_prompt(pov_mode: str) -> str:
+    prompt = CAPTION_PROMPT_TEMPLATE.format(POV_MODE=pov_mode)
+
+    # Optional user-provided examples to steer style. One caption per line.
+    # Lines starting with '#' are comments.
+    try:
+        examples = []
+        if os.path.exists(USER_EXAMPLES_FILE):
+            with open(USER_EXAMPLES_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    s = (line or "").strip()
+                    if not s or s.startswith("#"):
+                        continue
+                    # Avoid injecting hashtags into the examples section.
+                    s = re.sub(r"#\w+", "", s).strip()
+                    s = s.replace('"', "'")
+                    if not s:
+                        continue
+                    examples.append(s)
+                    if len(examples) >= 6:
+                        break
+
+        if examples:
+            prompt += "\n\nADDITIONAL STYLE EXAMPLES (do NOT copy wording; match the pattern):\n"
+            prompt += "\n".join([f"- \"{e}\"" for e in examples])
+    except:
+        pass
+
+    return prompt
 
 # ── Utilities ─────────────────────────────────────────────
 def notify(title, msg, notif_id="nb_status"):
@@ -560,7 +690,7 @@ def extract_parallel(vpath):
     return frames, audio_ok
 
 # ── Gemini ────────────────────────────────────────────────
-def generate_caption(api_key, frame_paths, audio_ok):
+def generate_caption(api_key, frame_paths, audio_ok, prompt_text: str):
     """Single Gemini multimodal call with frames + audio."""
     parts = []
 
@@ -580,13 +710,13 @@ def generate_caption(api_key, frame_paths, audio_ok):
             }
         })
 
-    parts.append({"text": CAPTION_PROMPT})
+    parts.append({"text": prompt_text})
 
     payload = {
         "contents": [{"parts": parts}],
         "generationConfig": {
             "temperature": 1.0,
-            "maxOutputTokens": 520
+            "maxOutputTokens": 900
         }
     }
 
@@ -608,16 +738,8 @@ def generate_caption(api_key, frame_paths, audio_ok):
 
     raise ValueError("Gemini rate limit")
 
-def format_result(raw):
-    """Parse CAPTION + HASHTAGS and sanitize output.
-
-    This tool used to enforce a short ~180 *character* caption. We now target a
-    longer caption (~180 *words*) while keeping the same CAPTION/HASHTAGS format.
-    """
-
-    def _word_count(text: str) -> int:
-        # Counts word-like tokens; keeps it simple and fast.
-        return len(re.findall(r"\b[\w']+\b", text or ""))
+def format_result(raw, pov_mode: str = ""):
+    """Parse CAPTION + HASHTAGS and sanitize output."""
 
     def _split_sentences(text: str) -> list[str]:
         text = (text or "").strip()
@@ -627,65 +749,44 @@ def format_result(raw):
         parts = re.split(r"(?<=[.!?])\s+", text)
         return [p.strip() for p in parts if p.strip()]
 
-    def _contains_first_person(text: str) -> bool:
-        fp = re.compile(
-            r"\b(i|i'm|im|i’ve|i've|me|my|mine|we|we're|were|our|ours|us)\b",
-            flags=re.IGNORECASE,
-        )
+    def _contains_collective_first_person(text: str) -> bool:
+        fp = re.compile(r"\b(we|we're|were|our|ours|us)\b", flags=re.IGNORECASE)
         return bool(fp.search(text or ""))
 
-    def _strip_first_person_sentences(text: str) -> str:
-        sentences = _split_sentences(text)
-        if not sentences:
-            return (text or "").strip()
-        kept = [s for s in sentences if not _contains_first_person(s)]
-        return " ".join(kept).strip() if kept else (text or "").strip()
-
-    def _repair_first_person_pronouns(text: str) -> str:
-        # Last resort: rewrite pronouns if any first-person remains.
+    def _repair_collective_first_person(text: str) -> str:
+        # Keep it simple: convert collective to third-person to avoid implying participation.
         replacements = [
-            (r"\bI\b", "They"),
-            (r"\bI['’]m\b", "They're"),
-            (r"\bI['’]ve\b", "They've"),
-            (r"\bme\b", "them"),
-            (r"\bmy\b", "their"),
-            (r"\bmine\b", "theirs"),
-            (r"\bwe\b", "they"),
             (r"\bwe['’]re\b", "they're"),
+            (r"\bwe\b", "they"),
             (r"\bour\b", "their"),
             (r"\bours\b", "theirs"),
             (r"\bus\b", "them"),
         ]
         out = text or ""
         for pat, rep in replacements:
-            out = re.sub(pat, rep, out)
+            out = re.sub(pat, rep, out, flags=re.IGNORECASE)
         out = re.sub(r"^\s*they\b", "They", out, flags=re.IGNORECASE)
         out = re.sub(r"\s{2,}", " ", out).strip()
         return out
 
-    def _trim_to_max_words(text: str, max_words: int) -> str:
+    def _contains_participant_first_person(text: str) -> bool:
+        # Heuristic: flags phrases that sound like the writer is involved, not observing.
+        bad = re.compile(
+            r"\b(i\s+(?:did|made|built|stabbed|hit|robbed|shot|ran|pulled\s+up|walked\s+up|came\s+out|was\s+there|we\s+(?:did|were|are)\b))",
+            flags=re.IGNORECASE,
+        )
+        return bool(bad.search(text or ""))
+
+    def _trim_to_max_chars(text: str, max_chars: int) -> str:
         text = (text or "").strip()
-        if _word_count(text) <= max_words:
+        if len(text) <= max_chars:
             return text
-
-        sentences = _split_sentences(text)
-        if len(sentences) >= 2:
-            kept = []
-            for sent in sentences:
-                candidate = (" ".join(kept + [sent])).strip()
-                if _word_count(candidate) > max_words:
-                    break
-                kept.append(sent)
-            if kept:
-                return " ".join(kept).strip()
-
-        # Fallback: hard word trim.
-        words = text.split()
-        trimmed = " ".join(words[:max_words]).strip()
-
-        # Prefer ending on a sentence boundary if we have one.
+        trimmed = text[:max_chars].rsplit(" ", 1)[0].strip()
+        if not trimmed:
+            trimmed = text[:max_chars].strip()
+        # Prefer ending on a sentence boundary if we have one late in the string.
         last_end = max(trimmed.rfind("."), trimmed.rfind("!"), trimmed.rfind("?"))
-        if last_end >= 0 and last_end >= int(len(trimmed) * 0.6):
+        if last_end >= 0 and last_end >= int(len(trimmed) * 0.65):
             trimmed = trimmed[: last_end + 1].strip()
         return trimmed
 
@@ -721,9 +822,9 @@ def format_result(raw):
     def _enforce_emoji_quota(
         caption: str,
         *,
-        min_emojis: int = 2,
+        min_emojis: int = 0,
         max_emojis: int = 3,
-        max_len: int = 130,
+        max_len: int = 220,
     ) -> str:
         caption = caption.strip()
 
@@ -738,9 +839,7 @@ def format_result(raw):
         if caption:
             caption = caption[0].upper() + caption[1:]
 
-        # Cap length first so we don't exceed guardrails.
-        if len(caption) > max_len:
-            caption = caption[:max_len].rsplit(" ", 1)[0].strip()
+        caption = _trim_to_max_chars(caption, max_len)
 
         # If too many emojis, drop extras.
         caption = _limit_emojis(caption, max_emojis)
@@ -748,7 +847,7 @@ def format_result(raw):
         fillers = ["😳", "👀", "🚨"]
         emoji_count = _count_emojis(caption)
 
-        # If too few emojis, add a couple generic ones.
+        # If too few emojis, optionally add a couple generic ones.
         for filler in fillers:
             if emoji_count >= min_emojis:
                 break
@@ -774,73 +873,240 @@ def format_result(raw):
 
         # Re-apply emoji cap + length guard after edits.
         caption = _limit_emojis(caption, max_emojis)
-        if len(caption) > max_len:
-            caption = caption[:max_len].rsplit(" ", 1)[0].strip()
+        caption = _trim_to_max_chars(caption, max_len)
         return caption
 
+    def _looks_flat(text: str) -> bool:
+        text = (text or "").strip().lower()
+        if not text:
+            return True
+        # Flat if it's too literal, no tension/implication, no punch.
+        implication = [
+            "got weird",
+            "isn't adding up",
+            "people are missing",
+            "could go left",
+            "something shift",
+            "doesn't sit right",
+            "quiet that just got",
+            "seen this go wrong",
+        ]
+        has_implication = any(p in text for p in implication)
+        has_punch = ("—" in text) or ("..." in text) or ("?" in text) or ("!" in text)
+        return (not has_implication) and (not has_punch)
+
+    def _inject_boost(caption: str, pov_mode: str) -> str:
+        """Local, zero-API rewrite pass: add one implication + one tension phrase if caption feels flat."""
+        caption = (caption or "").strip()
+        if not caption:
+            return caption
+
+        if not _looks_flat(caption):
+            return caption
+
+        implication_phrases = [
+            "and that’s when it got weird",
+            "something about this isn’t adding up",
+            "the part people are missing is…",
+            "you can feel something shift here",
+        ]
+        tension_phrases = [
+            "This doesn’t sit right.",
+            "That pause says everything.",
+            "It feels a little too quiet.",
+        ]
+
+        sents = _split_sentences(caption)
+        if not sents:
+            return caption
+
+        first = sents[0]
+        second = sents[1] if len(sents) > 1 else ""
+
+        # Add 1 implication to the first sentence if missing.
+        if not re.search(r"got weird|isn['’]t adding up|people are missing|shift here|go left", caption, flags=re.IGNORECASE):
+            first = (first.rstrip(".!?") + ", " + implication_phrases[0] + ".").strip()
+
+        # Add 1 tension sentence if we still have room.
+        rebuilt = (first + (" " + second if second else "")).strip()
+        rebuilt = _trim_to_max_chars(rebuilt, 220)
+
+        if len(_split_sentences(rebuilt)) < 2:
+            # Ensure 2 sentences by adding a short tension line.
+            rebuilt = (rebuilt.rstrip() + " " + tension_phrases[0]).strip()
+
+        # POV-specific nudge: if second-person mode, prefer a pointed question.
+        if "SECOND" in (pov_mode or "") and "?" not in rebuilt:
+            rebuilt = (rebuilt.rstrip(".! ") + " — you staying or turning back?").strip()
+
+        rebuilt = _trim_to_max_chars(rebuilt, 220)
+        return rebuilt
+
+    def _parse_candidates(text: str) -> list[tuple[str, str]]:
+        """Return list of (caption, hashtags) pairs."""
+        text = (text or "").strip()
+        if not text:
+            return []
+
+        # Split on explicit candidate headers if present.
+        chunks = re.split(r"(?im)^\s*CANDIDATE\s+\d+\s*:\s*$", text)
+        if len(chunks) <= 1:
+            chunks = [text]
+
+        out: list[tuple[str, str]] = []
+        for chunk in chunks:
+            if "CAPTION:" not in chunk or "HASHTAGS:" not in chunk:
+                continue
+            cap = chunk.split("HASHTAGS:")[0].replace("CAPTION:", "").strip()
+            tag = chunk.split("HASHTAGS:", 1)[1].strip().split("\n")[0].strip()
+            out.append((cap, tag))
+        return out
+
+    def _score_candidate(caption: str, hashtags: str, pov_mode: str) -> int:
+        score = 0
+        c = (caption or "").strip()
+        cl = c.lower()
+
+        # Length/structure targets
+        if 160 <= len(c) <= 240:
+            score += 12
+        elif 130 <= len(c) <= 260:
+            score += 6
+        else:
+            score -= 4
+
+        sents = _split_sentences(c)
+        if len(sents) == 2:
+            score += 12
+        elif len(sents) == 1:
+            score -= 6
+        else:
+            score -= 4
+
+        # POV enforcement signals
+        if "SECOND" in (pov_mode or ""):
+            if "?" in c:
+                score += 10
+            # More aggressive second-person phrasing
+            if any(p in cl for p in ["be honest", "you telling me", "you walking", "turning back"]):
+                score += 6
+        if "FIRST" in (pov_mode or ""):
+            if any(p in cl for p in ["doesn't sit right", "dont like how quiet", "i've seen this go wrong", "i’m not gonna lie", "i'm not gonna lie"]):
+                score += 6
+
+        # Curiosity/tension/implication
+        if any(p in cl for p in ["got weird", "isn't adding up", "people are missing", "could go left", "shift here", "doesn't sit right", "too quiet"]):
+            score += 10
+        if any(p in cl for p in ["until", "and then", "right after", "that pause", "the room", "vibe shifted", "went quiet"]):
+            score += 4
+
+        # Pattern interrupt + rhythm
+        if any(p in c for p in ["—", "...", ";"]):
+            score += 3
+        if any(s.strip().startswith(("Until", "Until ", "Then", "Then ")) for s in sents):
+            score += 2
+
+        # Penalize generic subject
+        if any(p in cl for p in ["this dude", "this guy", "some dude"]):
+            score -= 12
+
+        # Safety: avoid implying participation
+        if _contains_participant_first_person(c):
+            score -= 10
+        if _contains_collective_first_person(c):
+            score -= 6
+
+        # Hashtags sanity
+        tags = re.findall(r"#\w+", (hashtags or "").lower())
+        if 4 <= len(tags) <= 5:
+            score += 4
+        if "#breakingnews" in tags or "#localnews" in tags:
+            score += 4
+        return score
+
     try:
-        if "CAPTION:" in raw and "HASHTAGS:" in raw:
-            caption = raw.split("HASHTAGS:")[0].replace("CAPTION:", "").strip()
-            hashtags = raw.split("HASHTAGS:")[1].strip().split("\n")[0].strip()
-            hashtags = hashtags.strip().strip("[](){}")
+        candidates = _parse_candidates(raw)
+        if candidates:
+            # Use the same sanitation logic on each candidate, then pick best.
+            best_text = ""
+            best_score = -10**9
 
-            # Hard guardrails: no hashtags or app-name leakage in CAPTION
-            caption = re.sub(r"#\w+", "", caption)
-            caption = re.sub(r"\bnewsbreak\b", "", caption, flags=re.IGNORECASE)
-            caption = re.sub(r"\s+([?.!,])", r"\1", caption)
-            caption = re.sub(r"\s{2,}", " ", caption).strip()
+            for cand_caption, cand_hashtags in candidates[:3]:
+                caption = (cand_caption or "").strip()
+                hashtags = (cand_hashtags or "").strip().strip("[](){}")
 
-            # De-script + emoji cap, but don't force any minimum emojis.
-            caption = _enforce_emoji_quota(caption, min_emojis=0, max_emojis=3, max_len=2000)
+                # Hard guardrails: no hashtags or app-name leakage in CAPTION
+                caption = re.sub(r"#\w+", "", caption)
+                caption = re.sub(r"\bnewsbreak\b", "", caption, flags=re.IGNORECASE)
+                caption = re.sub(r"\s+([?.!,])", r"\1", caption)
+                caption = re.sub(r"\s{2,}", " ", caption).strip()
 
-            # Enforce: no first person in final output.
-            if _contains_first_person(caption):
-                caption = _strip_first_person_sentences(caption)
-            if _contains_first_person(caption):
-                caption = _repair_first_person_pronouns(caption)
+                # Prefer 2 sentences; if more, keep the first two.
+                sents = _split_sentences(caption)
+                if len(sents) >= 2:
+                    caption = (sents[0] + " " + sents[1]).strip()
+                else:
+                    caption = caption.strip()
 
-            # Length guard: keep caption near the requested range if it runs long.
-            # (We can't reliably expand a too-short model output here.)
-            caption = _trim_to_max_words(caption, 195)
+                # De-script + emoji cap, but don't force any minimum emojis.
+                caption = _enforce_emoji_quota(caption, min_emojis=0, max_emojis=3, max_len=220)
 
-            # Hashtag sanitation: drop platform/app + low-signal filler, enforce required tag
-            raw_tags = re.findall(r"#\w+", hashtags.lower())
-            banned_platform = {
-                "#newsbreak",
-                "#tiktok", "#instagram", "#youtube", "#facebook", "#snapchat",
-                "#twitter", "#x", "#reddit", "#discord", "#telegram",
-                "#newsbreakapp", "#fyp", "#viral", "#trending", "#foryou",
-            }
-            low_signal = {"#news", "#breaking", "#update", "#alert", "#live"}
+                # Avoid implying participation: eliminate collective "we/our/us" and obvious first-person actions.
+                if _contains_collective_first_person(caption):
+                    caption = _repair_collective_first_person(caption)
+                if _contains_participant_first_person(caption):
+                    # Last-resort soften: remove the clause after the first-person trigger.
+                    caption = re.sub(r"\bI\s+(?:did|made|built|stabbed|hit|robbed|shot|ran|pulled\s+up|walked\s+up|came\s+out)\b[^.!?]*", "", caption, flags=re.IGNORECASE).strip()
+                    caption = re.sub(r"\s{2,}", " ", caption).strip()
 
-            non_banned = []
-            seen_non_banned = set()
-            for tag in raw_tags:
-                if tag in banned_platform:
-                    continue
-                if tag not in seen_non_banned:
-                    seen_non_banned.add(tag)
-                    non_banned.append(tag)
+                # Optional boost if the caption is flat (no extra API calls)
+                caption = _inject_boost(caption, pov_mode=pov_mode)
 
-            clean_tags = []
-            seen = set()
-            for tag in non_banned:
-                if tag in low_signal:
-                    continue
-                if tag not in seen:
-                    seen.add(tag)
-                    clean_tags.append(tag)
+                # Length guard: keep caption tight.
+                caption = _trim_to_max_chars(caption, 220)
 
-            if "#breakingnews" not in seen and "#localnews" not in seen:
-                clean_tags.append("#localnews")
-                seen.add("#localnews")
+                # Hashtag sanitation: drop platform/app + low-signal filler, enforce required tag
+                raw_tags = re.findall(r"#\w+", hashtags.lower())
+                banned_platform = {
+                    "#newsbreak",
+                    "#tiktok", "#instagram", "#youtube", "#facebook", "#snapchat",
+                    "#twitter", "#x", "#reddit", "#discord", "#telegram",
+                    "#newsbreakapp", "#fyp", "#viral", "#trending", "#foryou",
+                }
+                low_signal = {"#news", "#breaking", "#update", "#alert", "#live"}
 
-            clean_tags = clean_tags[:5]
-            hashtags = " ".join(clean_tags).strip()
+                non_banned = []
+                seen_non_banned = set()
+                for tag in raw_tags:
+                    if tag in banned_platform:
+                        continue
+                    if tag not in seen_non_banned:
+                        seen_non_banned.add(tag)
+                        non_banned.append(tag)
 
-            if hashtags:
-                return f"{caption}\n\n{hashtags}".strip()
-            return caption.strip()
+                clean_tags = []
+                seen = set()
+                for tag in non_banned:
+                    if tag in low_signal:
+                        continue
+                    if tag not in seen:
+                        seen.add(tag)
+                        clean_tags.append(tag)
+
+                if "#breakingnews" not in seen and "#localnews" not in seen:
+                    clean_tags.append("#localnews")
+                    seen.add("#localnews")
+
+                clean_tags = clean_tags[:5]
+                hashtags = " ".join(clean_tags).strip()
+
+                # Score and pick.
+                s = _score_candidate(caption, hashtags, pov_mode=pov_mode)
+                if s > best_score:
+                    best_score = s
+                    best_text = (f"{caption}\n\n{hashtags}".strip() if hashtags else caption.strip())
+
+            return best_text.strip() if best_text else (raw or "").strip()
     except:
         pass
 
@@ -1126,8 +1392,10 @@ def main():
 
             set_processing_stage("generating")
             toast("Generating caption...")
-            raw    = generate_caption(api_key, frame_paths, audio_ok)
-            result = format_result(raw)
+            pov_mode = next_pov_mode()
+            prompt = build_caption_prompt(pov_mode)
+            raw    = generate_caption(api_key, frame_paths, audio_ok, prompt)
+            result = format_result(raw, pov_mode=pov_mode)
 
             print(f"\n{result}\n")
             if copy_to_clipboard(result):
