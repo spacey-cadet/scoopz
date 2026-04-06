@@ -61,7 +61,6 @@ CAPTION_PROMPT_TEMPLATE = """Write a punchy, scroll-stopping caption based on th
 POV: {POV_MODE}
 
 REQUIREMENTS:
-- 2 sentences only
 - ~170–190 characters total
 - Start with a specific visual detail (not generic)
 - Build tension or curiosity
@@ -72,9 +71,18 @@ STYLE:
 - Not formal, not news-like
 - Avoid generic phrasing
 
-EMOJI REQUIREMENT (non-negotiable):
-- Include 2–3 emojis naturally within the sentences
-- Captions without emojis are invalid
+CAPTION STRUCTURE (strict):
+You must write exactly 2 sentences.
+
+Sentence 1:
+- Must contain exactly 1 emoji somewhere in the middle (not at the end)
+
+Sentence 2:
+- Must contain 1–2 emojis naturally within the sentence
+
+Total emojis per caption: 2 or 3 (mandatory)
+
+If the caption does not contain emojis in BOTH sentences, it is invalid and must be rewritten internally before returning.
 
 HASHTAGS:
 - 4–5 lowercase tags
@@ -83,6 +91,15 @@ HASHTAGS:
 
 OUTPUT:
 Return 3 different candidates in this format:
+
+VALIDATION (internal, do not skip):
+Before returning each candidate, verify:
+1. There are exactly 2 sentences
+2. Sentence 1 contains at least 1 emoji
+3. Sentence 2 contains at least 1 emoji
+4. Total emojis = 2 or 3
+
+If ANY condition fails, rewrite the caption until all are satisfied.
 
 CANDIDATE 1:
 CAPTION:
