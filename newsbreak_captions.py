@@ -14,6 +14,7 @@ import socket
 import re
 import json
 import requests
+import secrets
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
@@ -25,6 +26,9 @@ GEMINI_BASE  = "https://generativelanguage.googleapis.com/v1beta/models"
 # Persist POV alternation across runs (2nd person ↔ 3rd person)
 POV_STATE_FILE = os.path.expanduser("~/.cache/scoopz_caption_pov.json")
 USER_EXAMPLES_FILE = os.path.expanduser("~/.config/scoopz_caption_examples.txt")
+
+# Optional: persist micro-style memory to reduce repetition across runs.
+STYLE_MEMORY_FILE = os.path.expanduser("~/.cache/scoopz_caption_style_memory.json")
 
 SCOOPZ_DIR   = "/sdcard/Pictures/scoopz"
 THUMB_DIR    = "/sdcard/Pictures/scoopz/.thumbs"
@@ -52,101 +56,51 @@ def set_processing_stage(stage: str, detail: str = ""):
         processing_detail = detail
 
 # ── Prompt ───────────────────────────────────────────────
-CAPTION_PROMPT_TEMPLATE = """You are writing a punchy, social caption reacting to what the video shows and what the audio captures.
+CAPTION_PROMPT_TEMPLATE = """Write a punchy, scroll-stopping caption based on the video frames and audio.
 
-You're NOT a news reporter. You're NOT a brand.
+POV: {POV_MODE}
 
-I'm giving you:
-1) Two frames from the video
-2) The audio from the video
+REQUIREMENTS:
+- 2 sentences only
+- ~170–190 characters total
+- Start with a specific visual detail (not generic)
+- Build tension or curiosity
+- End with a strong pull (question, judgment, or challenge)
 
-Your job: Write a caption that stops people mid-scroll by sounding raw, observant, and deeply local.
+STYLE:
+- Raw, human, slightly uncomfortable
+- Not formal, not news-like
+- Avoid generic phrasing
 
-POV FOR THIS CAPTION: {POV_MODE}
+EMOJI REQUIREMENT (non-negotiable):
+- Include 2–3 emojis naturally within the sentences
+- Captions without emojis are invalid
 
-CAPTION RULES:
-- Length: ~200 characters total (aim 170–220 characters), NOT counting hashtags.
-- Structure: 2 sentences.
-- POV:
-    - Follow the POV mode above.
-    - If POV is SECOND PERSON, include at least one direct question ending with a '?'.
-    - If POV is FIRST PERSON (OBSERVER): you may use I / me / my ONLY as commentary.
-        - You are NOT a participant in the scene.
-        - Do NOT claim you did anything in the video (no: "I did", "I made", "I pulled up", "we did", "we're here").
-        - Avoid collective first person (no: we, our, us).
-
-CAPTION STRUCTURE (biggest win):
-- Hook (pattern interrupt) → escalation → personal pull.
-    - Hook: make it sound slightly off / unresolved.
-    - Escalation: imply it could go left / something shifted.
-    - Personal pull: make the viewer choose a side, answer a pointed question, or admit what they'd do.
-
-- Start with a SPECIFIC ANCHOR DETAIL first (named person OR clear object/topic).
-    - If you are confident the audio names a person (e.g. “J Cole”), use the proper name.
-    - If no name is certain, use a concrete noun phrase: "Knife silencer setup...", "Mic check on stage..."
-    - Avoid generic subjects like "this dude", "this guy", "some dude" when anything more specific is available.
-- Be hyper-specific only when the media supports it (signage, uniforms, landmarks, street names, train lines, sirens, chants, etc.).
-- Sensory focus: volume, movement, vibe, traffic, smoke, weather, crowd, etc.
-- Avoid scripted openings. Do NOT start the caption with: "nah", "this is crazy", "this is wild", "can't believe".
-- Don't invent details you aren't 100% sure about from the frames/audio.
-- No news-anchor phrasing ("watch as", "caught on camera", "breaking:").
-- No brand/platform mentions (do NOT say "newsbreak", "tiktok", etc.).
-- Emojis: 1–3 max, used naturally.
-- If the audio is mostly background music, prioritize what the frames show; use the music only to set the mood.
-
-VIRALITY BOOST RULES:
-- Create a curiosity gap: imply something without fully explaining it.
-- Add tension: make it feel slightly uncomfortable, risky, or unresolved.
-- Avoid obvious descriptions; hint instead of explain.
-- Make the viewer feel like they might miss something important if they scroll.
-- Occasionally use short punchy sentences or a fragment for impact.
-- Prioritize emotional reaction over factual description.
-
-LANGUAGE UPGRADES:
-- Use implication language (pick 1 max):
-    “and that’s when it got weird” / “something about this isn’t adding up” / “the part people are missing is…” / “this could go left fast” / “you can feel something shift here”.
-- Make SECOND PERSON more aggressive/direct:
-    “You’re telling me you’d stay?” / “You walking into this or turning back?” / “Be honest—you’re not ignoring this, right?”
-- Make FIRST PERSON (OBSERVER) sound authoritative:
-    “I’m not gonna lie, this doesn’t sit right” / “I don’t like how quiet that just got” / “I’ve seen this go wrong before”.
-- Tighten emotion words: interesting→off, unusual→not right, surprising→weird, funny→dangerous/familiar/deep.
-
-STYLE EXAMPLES (do NOT copy wording; only match the vibe and structure):
-- "Cole just said the quiet part out loud about the rap game, and now everybody’s acting shocked. Do you agree, or is this just a rollout? 😳"
-- "He’s calling out the whole industry like it’s nothing, and the room got real quiet real fast. Would you back this take, or is it reaching?"
-- "They keep saying it’s ‘competition,’ but the way this is moving looks way deeper than that. If you’re watching this, what side are you on? 👀"
-- "She just put a timeline on what’s been happening behind the scenes, and it’s hard to un-hear it once it clicks. Do you buy it, yes or no?"
-- "The crowd is reacting like a nerve got touched, not like a normal hot take. If you’ve been paying attention, does this feel like the truth to you?"
-- "A knife with a silencer-style rig is the kind of overkill you can’t unsee. Would you ever trust somebody building this? 😳"
-- "J. Cole said it on stage with his chest and the whole vibe shifted fast. Do you think he meant every word?"
-- "I’m watching the room go dead quiet like a nerve just got touched. Are you hearing what he’s really saying? 👀"
-
-HASHTAGS RULES:
-- 4–5 tags only, all lowercase.
+HASHTAGS:
+- 4–5 lowercase tags
 - Include ONE of: #breakingnews or #localnews
-- Include the specific location/neighborhood if obvious.
-- Include 1–2 topic tags that fit what you can actually see/hear.
-- Avoid generic filler (#news, #update, #live) and platform tags (#viral, #fyp, #newsbreak #tiktok #instagram #youtube #tok, #catsoftiktok#catsofisntagram) or any tags with the names mentioned.
+- Avoid platform/app/tok/ig derivative tags
 
-OUTPUT EXACTLY:
+OUTPUT:
+Return 3 different candidates in this format:
 
 CANDIDATE 1:
 CAPTION:
-<caption text>
+...
 HASHTAGS:
-#tag1 #tag2 #tag3 #tag4
+...
 
 CANDIDATE 2:
 CAPTION:
-<caption text>
+...
 HASHTAGS:
-#tag1 #tag2 #tag3 #tag4
+...
 
 CANDIDATE 3:
 CAPTION:
-<caption text>
+...
 HASHTAGS:
-#tag1 #tag2 #tag3 #tag4"""
+..."""
 
 
 def _read_json(path: str) -> dict:
@@ -741,6 +695,30 @@ def generate_caption(api_key, frame_paths, audio_ok, prompt_text: str):
 def format_result(raw, pov_mode: str = ""):
     """Parse CAPTION + HASHTAGS and sanitize output."""
 
+    # Keep sanitation aligned with prompt target (~170–190 chars).
+    _CAPTION_MAX_CHARS = 200
+
+    # Compiled once per call to avoid duplicated patterns in helpers.
+    _EMOJI_RE = re.compile(
+        r"[\U0001F1E6-\U0001F1FF\U0001F300-\U0001FAFF\u2600-\u26FF\u2700-\u27BF]",
+        flags=re.UNICODE,
+    )
+    _SKIN_TONE_RE = re.compile(r"[\U0001F3FB-\U0001F3FF]", flags=re.UNICODE)
+
+    def _extract_emojis(text: str, *, limit: int = 8) -> list[str]:
+        """Best-effort emoji extraction for repetition tracking (single codepoints only)."""
+        found = _EMOJI_RE.findall(text or "")
+        out: list[str] = []
+        seen: set[str] = set()
+        for e in found:
+            if e in seen:
+                continue
+            seen.add(e)
+            out.append(e)
+            if len(out) >= limit:
+                break
+        return out
+
     def _split_sentences(text: str) -> list[str]:
         text = (text or "").strip()
         if not text:
@@ -792,27 +770,29 @@ def format_result(raw, pov_mode: str = ""):
 
     def _count_emojis(text: str) -> int:
         # Best-effort emoji count (kept intentionally simple).
-        emoji_re = re.compile(
-            r"[\U0001F1E6-\U0001F1FF\U0001F300-\U0001FAFF\u2600-\u26FF\u2700-\u27BF]",
-            flags=re.UNICODE,
-        )
-        return len(emoji_re.findall(text))
+        return len(_EMOJI_RE.findall(text or ""))
+
+    def _get_int_env(name: str, default: int, lo: int, hi: int) -> int:
+        try:
+            v = int(os.environ.get(name, str(default)).strip())
+            return max(lo, min(hi, v))
+        except:
+            return default
+
+    EMOJI_MAX = _get_int_env("SCOOPZ_EMOJI_MAX", 3, 1, 6)
+
+    STYLE_MEMORY_ON = (os.environ.get("SCOOPZ_STYLE_MEMORY", "1").strip() not in ("0", "false", "False"))
+    SCORING_DEBUG = (os.environ.get("SCOOPZ_SCORING_DEBUG", "0").strip() not in ("0", "false", "False"))
 
     def _limit_emojis(text: str, max_emojis: int) -> str:
-        emoji_re = re.compile(
-            r"[\U0001F1E6-\U0001F1FF\U0001F300-\U0001FAFF\u2600-\u26FF\u2700-\u27BF]",
-            flags=re.UNICODE,
-        )
-        skin_tone_re = re.compile(r"[\U0001F3FB-\U0001F3FF]", flags=re.UNICODE)
-
         kept = []
         emoji_count = 0
-        for ch in text:
+        for ch in (text or ""):
             # Keep joiners/modifiers/variation selectors so we don't break emoji sequences.
-            if ch in ("\u200d", "\ufe0f") or skin_tone_re.match(ch):
+            if ch in ("\u200d", "\ufe0f") or _SKIN_TONE_RE.match(ch):
                 kept.append(ch)
                 continue
-            if emoji_re.match(ch):
+            if _EMOJI_RE.match(ch):
                 if emoji_count >= max_emojis:
                     continue
                 emoji_count += 1
@@ -844,37 +824,49 @@ def format_result(raw, pov_mode: str = ""):
         # If too many emojis, drop extras.
         caption = _limit_emojis(caption, max_emojis)
 
-        fillers = ["😳", "👀", "🚨"]
-        emoji_count = _count_emojis(caption)
-
-        # If too few emojis, optionally add a couple generic ones.
-        for filler in fillers:
-            if emoji_count >= min_emojis:
-                break
-
-            candidate = (caption + (" " if caption else "") + filler).strip()
-            if len(candidate) <= max_len:
-                caption = candidate
-                emoji_count = _count_emojis(caption)
-                continue
-
-            # If we're tight on space, shorten by one word and retry.
-            if " " in caption:
-                shorter = caption.rsplit(" ", 1)[0].strip()
-            else:
-                shorter = caption[: max(0, max_len - 2)].strip()
-
-            candidate = (shorter + (" " if shorter else "") + filler).strip()
-            if shorter and len(candidate) <= max_len:
-                caption = candidate
-                emoji_count = _count_emojis(caption)
-            else:
-                break
-
         # Re-apply emoji cap + length guard after edits.
         caption = _limit_emojis(caption, max_emojis)
         caption = _trim_to_max_chars(caption, max_len)
         return caption
+
+    def _load_style_memory() -> dict:
+        if not STYLE_MEMORY_ON:
+            return {}
+        return _read_json(STYLE_MEMORY_FILE) or {}
+
+    def _save_style_memory(mem: dict) -> None:
+        if not STYLE_MEMORY_ON:
+            return
+        _write_json_atomic(STYLE_MEMORY_FILE, mem or {})
+
+    def _normalize_caption_for_memory(text: str) -> str:
+        s = (text or "").strip().lower()
+        s = s.replace("\ufe0f", "").replace("\u200d", "")
+        s = re.sub(r"\s+", " ", s)
+        return s
+
+    def _extract_signature_phrases(text: str) -> list[str]:
+        tl = (text or "").lower()
+        phrases = []
+        # Key implication/tension phrases that can feel repetitive.
+        for p in [
+            "and that’s when it got weird",
+            "and that's when it got weird",
+            "something about this isn’t adding up",
+            "something about this isn't adding up",
+            "the part people are missing is",
+            "you can feel something shift here",
+            "this doesn’t sit right",
+            "this doesn't sit right",
+            "that pause says everything",
+            "it feels a little too quiet",
+            "you staying or turning back",
+        ]:
+            if p in tl:
+                phrases.append(p)
+        # Emoji signatures (whatever emojis the model actually used).
+        phrases.extend(_extract_emojis(text, limit=3))
+        return phrases[:8]
 
     def _looks_flat(text: str) -> bool:
         text = (text or "").strip().lower()
@@ -904,16 +896,24 @@ def format_result(raw, pov_mode: str = ""):
         if not _looks_flat(caption):
             return caption
 
+        pattern_breakers = [
+            "and nobody’s reacting like they should",
+            "that’s not a normal reaction",
+            "this part doesn’t make sense",
+            "something feels off here",
+        ]
         implication_phrases = [
             "and that’s when it got weird",
             "something about this isn’t adding up",
             "the part people are missing is…",
             "you can feel something shift here",
+            "this could go left fast",
         ]
         tension_phrases = [
             "This doesn’t sit right.",
             "That pause says everything.",
             "It feels a little too quiet.",
+            "That’s not normal.",
         ]
 
         sents = _split_sentences(caption)
@@ -923,23 +923,38 @@ def format_result(raw, pov_mode: str = ""):
         first = sents[0]
         second = sents[1] if len(sents) > 1 else ""
 
-        # Add 1 implication to the first sentence if missing.
-        if not re.search(r"got weird|isn['’]t adding up|people are missing|shift here|go left", caption, flags=re.IGNORECASE):
-            first = (first.rstrip(".!?") + ", " + implication_phrases[0] + ".").strip()
+        # Add 1 pattern-breaker or implication to the first sentence if missing.
+        if not re.search(r"got weird|isn['’]t adding up|people are missing|shift here|go left|feels off|doesn['’]t make sense|not a normal reaction|reacting", caption, flags=re.IGNORECASE):
+            try:
+                add = secrets.choice(pattern_breakers + implication_phrases)
+            except Exception:
+                add = pattern_breakers[0]
+            first = (first.rstrip(".!?") + ", " + add + ".").strip()
 
         # Add 1 tension sentence if we still have room.
         rebuilt = (first + (" " + second if second else "")).strip()
-        rebuilt = _trim_to_max_chars(rebuilt, 220)
+        rebuilt = _trim_to_max_chars(rebuilt, _CAPTION_MAX_CHARS)
 
         if len(_split_sentences(rebuilt)) < 2:
             # Ensure 2 sentences by adding a short tension line.
-            rebuilt = (rebuilt.rstrip() + " " + tension_phrases[0]).strip()
+            try:
+                rebuilt = (rebuilt.rstrip() + " " + secrets.choice(tension_phrases)).strip()
+            except Exception:
+                rebuilt = (rebuilt.rstrip() + " " + tension_phrases[0]).strip()
 
-        # POV-specific nudge: if second-person mode, prefer a pointed question.
+        # POV-specific nudge: second-person questions should be slightly confrontational.
         if "SECOND" in (pov_mode or "") and "?" not in rebuilt:
-            rebuilt = (rebuilt.rstrip(".! ") + " — you staying or turning back?").strip()
+            confront = [
+                "You're staying for THIS?",
+                "You're telling me you'd stay?",
+                "Be honest—you're not walking away, right?",
+            ]
+            try:
+                rebuilt = (rebuilt.rstrip(".! ") + " " + secrets.choice(confront)).strip()
+            except Exception:
+                rebuilt = (rebuilt.rstrip(".! ") + " " + confront[0]).strip()
 
-        rebuilt = _trim_to_max_chars(rebuilt, 220)
+        rebuilt = _trim_to_max_chars(rebuilt, _CAPTION_MAX_CHARS)
         return rebuilt
 
     def _parse_candidates(text: str) -> list[tuple[str, str]]:
@@ -962,66 +977,177 @@ def format_result(raw, pov_mode: str = ""):
             out.append((cap, tag))
         return out
 
+    def _is_platform_derivative_hashtag(tag: str) -> bool:
+        """Return True if tag is a TikTok/Instagram-derivative hashtag the user wants banned."""
+        t = (tag or "").strip().lower()
+        if not t.startswith("#"):
+            return False
+        body = t[1:]
+        # Explicit TikTok anywhere (covers: #tiktok, #catsoftiktok, #cats_of_tiktok, etc.)
+        if "tiktok" in body:
+            return True
+        # "tok" combined with something else (covers: #cattok, #wirdltok, etc.)
+        # Keep conservative: only ban when it *ends* with tok (not substrings like #tokyo).
+        if body.endswith("tok") and body != "tok":
+            return True
+
+        # Explicit Instagram anywhere (covers: #instagram, #instagramreels, etc.)
+        if "instagram" in body:
+            return True
+        # Common Instagram derivatives: #insta*, #ig
+        # Avoid false positives for common English words like #instant / #instantly.
+        if body.startswith("insta") and body not in {"instant", "instantly"}:
+            return True
+        if body in {"ig", "instareels", "reels"}:
+            # Note: #reels can be cross-platform; user requested Instagram derivatives,
+            # and this often signals Instagram-specific posting.
+            return True
+        return False
+
     def _score_candidate(caption: str, hashtags: str, pov_mode: str) -> int:
         score = 0
+        breakdown: dict[str, int] = {}
         c = (caption or "").strip()
         cl = c.lower()
 
         # Length/structure targets
-        if 160 <= len(c) <= 240:
-            score += 12
-        elif 130 <= len(c) <= 260:
-            score += 6
+        if 170 <= len(c) <= 200:
+            score += 10; breakdown["len_good"] = 10
+        elif 155 <= len(c) <= 215:
+            score += 5; breakdown["len_ok"] = 5
         else:
-            score -= 4
+            score -= 6; breakdown["len_off"] = -6
 
         sents = _split_sentences(c)
         if len(sents) == 2:
-            score += 12
+            score += 12; breakdown["two_sent"] = 12
         elif len(sents) == 1:
-            score -= 6
+            score -= 6; breakdown["one_sent"] = -6
         else:
-            score -= 4
+            score -= 8; breakdown["many_sent"] = -8
+
+        # Reward casual human cadence (some contractions, not overly formulaic).
+        contractions = len(re.findall(r"\b(?:don't|can't|won't|you're|isn't|aren't|didn't|doesn't|i'm|i’ve|i've|that's|there's)\b", cl))
+        if contractions >= 1:
+            score += 3; breakdown["contractions"] = 3
+
+        # Penalize overly templated phrasing if multiple "prompt phrases" stack up.
+        templated_hits = len(_extract_signature_phrases(c))
+        if templated_hits >= 3:
+            score -= 6; breakdown["templated"] = -6
+        elif templated_hits == 2:
+            score -= 2; breakdown["templated2"] = -2
+
+        # Reward an "anchor detail": a proper noun or specific-looking token.
+        # Heuristic: a capitalized word not at start OR a digit marker (train line, street #, etc.).
+        anchor = False
+        words = re.findall(r"\b[\w']+\b", c)
+        for w in words[1:10]:
+            if len(w) >= 3 and w[0].isupper() and w.lower() not in ("i", "im", "i'm"):
+                anchor = True
+                break
+        if not anchor and re.search(r"\b\d{1,3}(?:st|nd|rd|th)?\b", c):
+            anchor = True
+        if anchor:
+            score += 4; breakdown["anchor"] = 4
 
         # POV enforcement signals
         if "SECOND" in (pov_mode or ""):
             if "?" in c:
-                score += 10
+                score += 10; breakdown["second_q"] = 10
             # More aggressive second-person phrasing
             if any(p in cl for p in ["be honest", "you telling me", "you walking", "turning back"]):
-                score += 6
+                score += 4; breakdown["second_aggr"] = 4
+            if any(p in cl for p in ["you're staying for this", "you’re staying for this", "for this?", "for this ?"]):
+                score += 3; breakdown["second_confront"] = 3
         if "FIRST" in (pov_mode or ""):
             if any(p in cl for p in ["doesn't sit right", "dont like how quiet", "i've seen this go wrong", "i’m not gonna lie", "i'm not gonna lie"]):
-                score += 6
+                score += 4; breakdown["first_auth"] = 4
 
         # Curiosity/tension/implication
         if any(p in cl for p in ["got weird", "isn't adding up", "people are missing", "could go left", "shift here", "doesn't sit right", "too quiet"]):
-            score += 10
+            score += 9; breakdown["tension"] = 9
         if any(p in cl for p in ["until", "and then", "right after", "that pause", "the room", "vibe shifted", "went quiet"]):
-            score += 4
+            score += 3; breakdown["timing"] = 3
 
         # Pattern interrupt + rhythm
         if any(p in c for p in ["—", "...", ";"]):
-            score += 3
+            score += 2; breakdown["rhythm"] = 2
         if any(s.strip().startswith(("Until", "Until ", "Then", "Then ")) for s in sents):
-            score += 2
+            score += 1; breakdown["lead_word"] = 1
 
         # Penalize generic subject
         if any(p in cl for p in ["this dude", "this guy", "some dude"]):
-            score -= 12
+            score -= 14; breakdown["generic"] = -14
+
+        # Penalize generic openings harder (his/her/this/that at start reads like template).
+        if re.match(r"^(his|her|this|that)\b", cl):
+            score -= 10; breakdown["generic_open"] = -10
+
+        # Novelty scoring: lightly penalize common overused phrases to force variety.
+        common_phrases = [
+            "would you",
+            "this could go left",
+            "got weird",
+            "room got quiet",
+        ]
+        hit = 0
+        for p in common_phrases:
+            if p in cl:
+                score -= 3
+                hit += 1
+        if hit:
+            breakdown["common_phrase"] = -3 * hit
 
         # Safety: avoid implying participation
         if _contains_participant_first_person(c):
-            score -= 10
+            score -= 12; breakdown["participation"] = -12
         if _contains_collective_first_person(c):
-            score -= 6
+            score -= 8; breakdown["collective"] = -8
 
         # Hashtags sanity
         tags = re.findall(r"#\w+", (hashtags or "").lower())
         if 4 <= len(tags) <= 5:
-            score += 4
+            score += 4; breakdown["tags_count"] = 4
         if "#breakingnews" in tags or "#localnews" in tags:
-            score += 4
+            score += 4; breakdown["req_tag"] = 4
+
+        # Anti-repetition across runs (optional). Prevents robotic sameness.
+        try:
+            mem = _load_style_memory()
+            recent_caps = mem.get("recent_captions", []) or []
+            recent_phr = mem.get("recent_phrases", []) or []
+            recent_emo = mem.get("recent_emojis", []) or []
+
+            norm = _normalize_caption_for_memory(c)
+            if norm and norm in set(recent_caps[-20:]):
+                score -= 25; breakdown["dup_caption"] = -25
+
+            sig = _extract_signature_phrases(c)
+            rep = 0
+            for p in sig:
+                if p in recent_phr:
+                    rep += 1
+            if rep:
+                penalty = min(10, rep * 3)
+                score -= penalty
+                breakdown["repeat_phrase"] = -penalty
+
+            # Slightly penalize reusing the same filler emojis over and over.
+            emo_in = _extract_emojis(c, limit=4)
+            if emo_in and any(e in set(recent_emo[-20:]) for e in emo_in):
+                score -= 2; breakdown["repeat_emoji"] = -2
+        except:
+            pass
+
+        if SCORING_DEBUG:
+            try:
+                keys = sorted(breakdown.keys())
+                dbg = ", ".join([f"{k}:{breakdown[k]}" for k in keys])
+                print(f"[score] {score:>4} | {dbg} | {c[:70]}")
+            except:
+                pass
+
         return score
 
     try:
@@ -1049,7 +1175,7 @@ def format_result(raw, pov_mode: str = ""):
                     caption = caption.strip()
 
                 # De-script + emoji cap, but don't force any minimum emojis.
-                caption = _enforce_emoji_quota(caption, min_emojis=0, max_emojis=3, max_len=220)
+                caption = _enforce_emoji_quota(caption, min_emojis=0, max_emojis=EMOJI_MAX, max_len=_CAPTION_MAX_CHARS)
 
                 # Avoid implying participation: eliminate collective "we/our/us" and obvious first-person actions.
                 if _contains_collective_first_person(caption):
@@ -1063,7 +1189,7 @@ def format_result(raw, pov_mode: str = ""):
                 caption = _inject_boost(caption, pov_mode=pov_mode)
 
                 # Length guard: keep caption tight.
-                caption = _trim_to_max_chars(caption, 220)
+                caption = _trim_to_max_chars(caption, _CAPTION_MAX_CHARS)
 
                 # Hashtag sanitation: drop platform/app + low-signal filler, enforce required tag
                 raw_tags = re.findall(r"#\w+", hashtags.lower())
@@ -1078,6 +1204,8 @@ def format_result(raw, pov_mode: str = ""):
                 non_banned = []
                 seen_non_banned = set()
                 for tag in raw_tags:
+                    if _is_platform_derivative_hashtag(tag):
+                        continue
                     if tag in banned_platform:
                         continue
                     if tag not in seen_non_banned:
@@ -1105,6 +1233,34 @@ def format_result(raw, pov_mode: str = ""):
                 if s > best_score:
                     best_score = s
                     best_text = (f"{caption}\n\n{hashtags}".strip() if hashtags else caption.strip())
+
+            # Update style memory with the selected caption to reduce repetition next run.
+            if best_text:
+                try:
+                    mem = _load_style_memory()
+                    mem.setdefault("recent_captions", [])
+                    mem.setdefault("recent_phrases", [])
+                    mem.setdefault("recent_emojis", [])
+
+                    chosen_caption = best_text.split("\n\n", 1)[0].strip()
+                    norm = _normalize_caption_for_memory(chosen_caption)
+                    if norm:
+                        mem["recent_captions"].append(norm)
+                        mem["recent_captions"] = mem["recent_captions"][-30:]
+
+                    sig = _extract_signature_phrases(chosen_caption)
+                    if sig:
+                        mem["recent_phrases"].extend(sig)
+                        mem["recent_phrases"] = mem["recent_phrases"][-80:]
+
+                    emo = _extract_emojis(chosen_caption, limit=6)
+                    if emo:
+                        mem["recent_emojis"].extend(emo)
+                        mem["recent_emojis"] = mem["recent_emojis"][-40:]
+
+                    _save_style_memory(mem)
+                except:
+                    pass
 
             return best_text.strip() if best_text else (raw or "").strip()
     except:
