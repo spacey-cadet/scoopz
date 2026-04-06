@@ -30,6 +30,9 @@ USER_EXAMPLES_FILE = os.path.expanduser("~/.config/scoopz_caption_examples.txt")
 # Optional: persist micro-style memory to reduce repetition across runs.
 STYLE_MEMORY_FILE = os.path.expanduser("~/.cache/scoopz_caption_style_memory.json")
 
+# Cache readability so we don't re-probe the same broken files every run.
+READABILITY_CACHE_FILE = os.path.expanduser("~/.cache/scoopz_video_readability.json")
+
 SCOOPZ_DIR   = "/sdcard/Pictures/scoopz"
 THUMB_DIR    = "/sdcard/Pictures/scoopz/.thumbs"
 
@@ -38,6 +41,9 @@ TEMP_FRAME_2 = "/sdcard/Download/nb_frame2.jpg"
 TEMP_AUDIO   = "/sdcard/Download/nb_audio.mp3"
 
 PORT         = 8765
+
+# Optional reports
+UNREADABLE_REPORT_FILE = os.path.expanduser("~/.cache/scoopz_unreadable_videos.txt")
 # ─────────────────────────────────────────────────────────
 
 selected_video  = None
@@ -72,10 +78,11 @@ STYLE:
 - Avoid generic phrasing
 
 CAPTION STRUCTURE (strict):
-You must write exactly 2 sentences.
+You must write exactly 2 sentences each 70-80 characters or less, following these rules:
 
 Sentence 1:
 - Must contain exactly 1 emoji somewhere in the middle (not at the end)
+- Must be 70-80 characters long
 
 Sentence 2:
 - Must contain 1–2 emojis naturally within the sentence
@@ -441,7 +448,7 @@ def load_videos():
     """
     Return videos from SCOOPZ_DIR that:
     1. Exist as files
-    2. Are in MediaStore (not deleted from Google Photos)
+    2. Are in MediaStore (Gallery)
     """
     all_files = [
         os.path.join(SCOOPZ_DIR, f)
@@ -452,19 +459,32 @@ def load_videos():
     # Filter: only files that actually exist
     existing = [v for v in all_files if os.path.exists(v)]
     
-    # Filter: only files MediaStore knows about
+    # Optional: hide files we've already proven unreadable (without deleting them).
+    hide_unreadable = os.environ.get("SCOOPZ_HIDE_UNREADABLE", "0").strip() in ("1", "true", "True")
+    if hide_unreadable:
+        cache = _read_json(READABILITY_CACHE_FILE)
+        entries = (cache.get("entries") or {}) if isinstance(cache, dict) else {}
+        pruned = []
+        for p in existing:
+            try:
+                e = entries.get(p) or {}
+                if e.get("ok") is False:
+                    mtime = os.path.getmtime(p)
+                    size = os.path.getsize(p)
+                    if e.get("mtime") == mtime and e.get("size") == size:
+                        continue
+            except:
+                pass
+            pruned.append(p)
+        existing = pruned
+
+    # Gallery-only: only show videos MediaStore knows about.
+    # If MediaStore is unavailable, fall back to existing.
     known = mediastore_paths()
-    
-    if not known:
-        # MediaStore unavailable - show all existing files
-        filtered = existing
-    else:
-        # Only show files that are in MediaStore (not deleted from gallery)
-        filtered = [v for v in existing if v in known]
-    
-    # Sort by modification time, newest first
+    filtered = [v for v in existing if (not known) or (v in known)]
+
     filtered.sort(key=os.path.getmtime, reverse=True)
-    
+
     return filtered
 
 # ── Thumbnails (Strict Filtering) ─────────────────────────
@@ -488,8 +508,19 @@ def generate_thumbnails(videos):
     except:
         pass
 
+    cache = _read_json(READABILITY_CACHE_FILE)
+    if not isinstance(cache, dict):
+        cache = {}
+    entries = cache.get("entries")
+    if not isinstance(entries, dict):
+        entries = {}
+        cache["entries"] = entries
+    cache["version"] = cache.get("version") or 1
+
     total = len(videos)
     readable_videos = []
+    skipped_paths = []
+    verbose_skips = os.environ.get("SCOOPZ_VERBOSE_SKIPS", "0").strip() in ("1", "true", "True")
 
     for idx, vpath in enumerate(videos):
         if idx % 5 == 0:
@@ -498,6 +529,18 @@ def generate_thumbnails(videos):
         name       = os.path.basename(vpath)
         thumb_path = os.path.join(THUMB_DIR, name + ".jpg")
 
+        # Fast path: if we already validated this exact file and a thumbnail exists, trust it.
+        try:
+            mtime = os.path.getmtime(vpath)
+            size = os.path.getsize(vpath)
+            e = entries.get(vpath) or {}
+            if e.get("ok") is True and e.get("mtime") == mtime and e.get("size") == size:
+                if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 500:
+                    readable_videos.append(vpath)
+                    continue
+        except:
+            pass
+
         # Strict Filter: if the file isn't decodable, drop it (and any stale thumbnail).
         if not is_video_readable(vpath):
             try:
@@ -505,7 +548,9 @@ def generate_thumbnails(videos):
                     os.remove(thumb_path)
             except:
                 pass
-            print(f"⚠️  Skipped corrupted or unreadable file: {name}")
+            skipped_paths.append(vpath)
+            if verbose_skips:
+                print(f"⚠️  Skipped corrupted or unreadable file: {name}")
             continue
 
         # Strict Filter: if ffmpeg can't extract even 1 frame, it's not usable.
@@ -515,7 +560,9 @@ def generate_thumbnails(videos):
                     os.remove(thumb_path)
             except:
                 pass
-            print(f"⚠️  Skipped corrupted or unreadable file: {name}")
+            skipped_paths.append(vpath)
+            if verbose_skips:
+                print(f"⚠️  Skipped corrupted or unreadable file: {name}")
             continue
 
         # Check if good thumbnail already exists
@@ -572,7 +619,41 @@ def generate_thumbnails(videos):
         if success:
             readable_videos.append(vpath)
         else:
-            print(f"⚠️  Skipped corrupted or unreadable file: {name}")
+            skipped_paths.append(vpath)
+            if verbose_skips:
+                print(f"⚠️  Skipped corrupted or unreadable file: {name}")
+
+    # Update readability cache (so we don't keep re-probing the same broken files).
+    try:
+        for p in readable_videos:
+            try:
+                entries[p] = {"ok": True, "mtime": os.path.getmtime(p), "size": os.path.getsize(p)}
+            except:
+                pass
+        for p in skipped_paths:
+            try:
+                entries[p] = {"ok": False, "mtime": os.path.getmtime(p), "size": os.path.getsize(p)}
+            except:
+                pass
+        _write_json_atomic(READABILITY_CACHE_FILE, cache)
+    except:
+        pass
+
+    # Summarize skips (avoid spamming the terminal).
+    if skipped_paths and not verbose_skips:
+        print(f"⚠️  Skipped {len(skipped_paths)} unreadable videos (set SCOOPZ_VERBOSE_SKIPS=1 to list each)")
+    if skipped_paths:
+        try:
+            os.makedirs(os.path.dirname(UNREADABLE_REPORT_FILE), exist_ok=True)
+            with open(UNREADABLE_REPORT_FILE, "w", encoding="utf-8") as f:
+                # Write full paths + existence so you can locate (or see if they were moved/deleted).
+                for p in skipped_paths:
+                    status = "EXISTS" if os.path.exists(p) else "MISSING"
+                    f.write(f"{status}\t{p}\n")
+            if not verbose_skips:
+                print(f"📝 Unreadable list saved to: {UNREADABLE_REPORT_FILE}")
+        except:
+            pass
 
     toast("Ready")
     return readable_videos
@@ -1513,7 +1594,7 @@ def main():
         toast("No videos found!")
         sys.exit(1)
 
-    print(f"� Found {len(videos)} videos in gallery")
+    print(f"📼 Found {len(videos)} videos in Gallery: {SCOOPZ_DIR}")
     videos = generate_thumbnails(videos)
     if not videos:
         toast("No readable videos!")

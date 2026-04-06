@@ -23,6 +23,13 @@ POLL_RATE   = 0.5
 TIKWM_API   = "https://www.tikwm.com/api/"
 TIKTOK_RE   = re.compile(r"https?://(?:(?:www|vt|vm)\.)?tiktok\.com/\S+", re.I)
 
+# Reject tiny/partial files and retry instead of saving unreadable mp4s.
+# You can override this if needed: SCOOPZ_MIN_BYTES=0
+MIN_BYTES = int(os.environ.get("SCOOPZ_MIN_BYTES", "250000"))
+
+# Download retries (per video). Lower = faster, higher = more resilient.
+DOWNLOAD_RETRIES = int(os.environ.get("SCOOPZ_DOWNLOAD_RETRIES", "2"))
+
 class ScoopzHybrid:
     def __init__(self):
         self.queue = asyncio.Queue()
@@ -74,14 +81,95 @@ class ScoopzHybrid:
     def _sync_download(self, play_url, final_path):
         """Runs blocking requests operations safely in a thread"""
         temp_path = final_path.with_suffix('.mp4.part')
+
+        def _looks_valid_mp4(path: Path) -> bool:
+            try:
+                if not path.exists():
+                    return False
+                if MIN_BYTES > 0 and path.stat().st_size < MIN_BYTES:
+                    return False
+            except Exception:
+                return False
+
+            # Prefer ffprobe if available (fast + accurate).
+            try:
+                r = subprocess.run(
+                    [
+                        "ffprobe",
+                        "-v", "error",
+                        "-select_streams", "v:0",
+                        "-show_entries", "format=duration",
+                        "-of", "default=nw=1:nk=1",
+                        str(path),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    check=False,
+                )
+                if r.returncode != 0:
+                    return False
+                dur_s = (r.stdout or "").strip()
+                try:
+                    dur = float(dur_s)
+                except Exception:
+                    dur = 0.0
+                return dur > 0.5
+            except FileNotFoundError:
+                # ffprobe not installed; best-effort fallback already checked size.
+                pass
+            except Exception:
+                return False
+
+            # Align with Scoopz usage: ffmpeg must be able to decode at least one frame.
+            try:
+                r = subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-nostdin",
+                        "-v",
+                        "error",
+                        "-i",
+                        str(path),
+                        "-map",
+                        "0:v:0",
+                        "-frames:v",
+                        "1",
+                        "-f",
+                        "null",
+                        "-",
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=12,
+                    check=False,
+                )
+                return r.returncode == 0
+            except FileNotFoundError:
+                # ffmpeg not installed: fall back to size-only.
+                return True
+            except Exception:
+                return False
         
+        retries = max(1, DOWNLOAD_RETRIES)
+
         # Retry loop for the actual video file
-        for attempt in range(3):
+        for attempt in range(retries):
             try:
                 with self.session.get(play_url, stream=True, timeout=30) as r:
                     r.raise_for_status()
                     with open(temp_path, "wb") as f:
                         shutil.copyfileobj(r.raw, f)
+
+                # Validate before saving into the gallery folder.
+                if not _looks_valid_mp4(temp_path):
+                    try:
+                        temp_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    if attempt < retries - 1:
+                        time.sleep(2)
+                    continue
                 
                 # Success! Rename to final mp4
                 temp_path.rename(final_path)
@@ -92,7 +180,7 @@ class ScoopzHybrid:
                 if temp_path.exists():
                     temp_path.unlink()
                 
-                if attempt < 2:
+                if attempt < retries - 1:
                     time.sleep(2) # Wait before retry
         return False
 
