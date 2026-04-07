@@ -1056,24 +1056,68 @@ def format_result(raw, pov_mode: str = ""):
         return rebuilt
 
     def _parse_candidates(text: str) -> list[tuple[str, str]]:
-        """Return list of (caption, hashtags) pairs."""
-        text = (text or "").strip()
+        """Return list of (caption, hashtags) pairs.
+
+        Gemini sometimes varies formatting (markdown bolding, missing colons,
+        headers on the same line, etc.). This parser is intentionally tolerant
+        so we don't fall back to copying the entire raw multi-candidate blob.
+        """
+        text = (text or "").replace("\r\n", "\n").replace("\r", "\n").strip()
         if not text:
             return []
 
-        # Split on explicit candidate headers if present.
-        chunks = re.split(r"(?im)^\s*CANDIDATE\s+\d+\s*:\s*$", text)
-        if len(chunks) <= 1:
-            chunks = [text]
-
         out: list[tuple[str, str]] = []
-        for chunk in chunks:
-            if "CAPTION:" not in chunk or "HASHTAGS:" not in chunk:
-                continue
-            cap = chunk.split("HASHTAGS:")[0].replace("CAPTION:", "").strip()
-            tag = chunk.split("HASHTAGS:", 1)[1].strip().split("\n")[0].strip()
-            out.append((cap, tag))
-        return out
+
+        # Pass 1: full candidate blocks.
+        # Accept optional markdown emphasis around labels and optional colons.
+        cand_pat = re.compile(
+            r"(?ims)^\s*(?:\*\*?)?\s*candidate\s*(\d+)\s*(?:\*\*?)?\s*[:\-]?\s*(?:\n|\s)+"
+            r"\s*(?:\*\*?)?\s*caption\s*[:\-]?\s*(?:\*\*?)?\s*(.*?)\n"
+            r"\s*(?:\*\*?)?\s*(?:hashtags?|tags)\s*[:\-]?\s*(?:\*\*?)?\s*(.*?)"
+            r"(?=\n\s*(?:\*\*?)?\s*candidate\s*\d+\b|\Z)",
+        )
+        for m in cand_pat.finditer(text):
+            cap = (m.group(2) or "").strip()
+            tags = (m.group(3) or "").strip()
+            if cap and tags:
+                out.append((cap, tags))
+
+        if out:
+            return out
+
+        # Pass 2: caption/hashtags pairs without candidate headers.
+        pair_pat = re.compile(
+            r"(?ims)\bcaption\s*[:\-]?\s*(.*?)\n\s*(?:hashtags?|tags)\s*[:\-]?\s*(.*?)"
+            r"(?=\n\s*\bcaption\s*[:\-]?|\Z)",
+        )
+        for m in pair_pat.finditer(text):
+            cap = (m.group(1) or "").strip()
+            tags = (m.group(2) or "").strip()
+            if cap and tags:
+                out.append((cap, tags))
+
+        if out:
+            return out
+
+        # Pass 3: salvage Candidate 1 only (prevents copying all candidates).
+        try:
+            m1 = re.search(r"(?im)^\s*(?:\*\*?)?\s*candidate\s*1\b.*$", text)
+            if m1:
+                tail = text[m1.start():]
+                m2 = re.search(r"(?im)^\s*(?:\*\*?)?\s*candidate\s*2\b.*$", tail)
+                if m2:
+                    tail = tail[:m2.start()]
+
+                mcap = re.search(r"(?ims)\bcaption\s*[:\-]?\s*(.*?)\n\s*(?:hashtags?|tags)\s*[:\-]?\s*(.*)\Z", tail)
+                if mcap:
+                    cap = (mcap.group(1) or "").strip()
+                    tags = (mcap.group(2) or "").strip()
+                    if cap and tags:
+                        return [(cap, tags)]
+        except:
+            pass
+
+        return []
 
     def _is_platform_derivative_hashtag(tag: str) -> bool:
         """Return True if tag is a TikTok/Instagram-derivative hashtag the user wants banned."""
