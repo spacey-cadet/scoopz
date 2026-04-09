@@ -3,7 +3,7 @@
 This repository contains:
 - collector.py (Termux/phone)
 - newsbreak_captions.py (Termux/phone picker + evidence upload)
-- scoopz_laptop_server.py (laptop “brain”: OCR + Whisper + local LLM)
+- scoopz_laptop_server.py (laptop “brain”: OCR + Whisper locally + OpenAI captions from text-only evidence)
 - scoopz_env.sh (Termux helper commands)
 
 ## What This Does Now
@@ -24,7 +24,7 @@ The workflow is split across two devices:
 - collector.py watches a link inbox file and downloads TikTok videos to `/sdcard/Pictures/scoopz`.
 - newsbreak_captions.py runs a local web picker on your phone (127.0.0.1:8765).
 - When you press Generate, the phone extracts evidence packs and POSTs them to `SCOOPZ_REMOTE_URL + /batch`.
-- scoopz_laptop_server.py receives the evidence and generates captions locally.
+- scoopz_laptop_server.py receives the evidence, runs OCR + Whisper locally, and uses OpenAI to write captions from text-only evidence.
 
 ## Phone Setup (Termux)
 
@@ -64,19 +64,59 @@ mkdir -p /sdcard/Download
 : > /sdcard/Download/scoopz_history.log
 ```
 
-Set your laptop server URL (replace with your laptop IP):
+### Recommended: Source `scoopz_env.sh` (robust)
+
+Install the helpers into your Termux shell (run once):
 
 ```bash
-export SCOOPZ_REMOTE_URL="http://192.168.0.103:9000"
+echo 'source ~/scoopz/scoopz_env.sh' >> ~/.bashrc
+source ~/.bashrc
 ```
 
-Audio upload toggle (recommended ON if most videos have speech):
+Set the laptop server URL (this is `SCOOPZ_REMOTE_URL`).
+
+1) On the laptop, get the LAN IP (usually starts with `192.168.` or `10.`):
 
 ```bash
+hostname -I
+```
+
+2) On the phone, set/test it using the helper commands:
+
+```bash
+pkg install -y curl iproute2
+
+# Best effort auto-detect (works if laptop is visible on Wi‑Fi)
+scoopz-remote-auto
+
+# Or set manually (recommended if auto-detect fails)
+scoopz-remote-set <LAPTOP_IP>
+
+# Or try auto-detect (works if laptop is visible on Wi‑Fi)
+scoopz-remote-auto
+
+# Test connectivity
+scoopz-remote-test
+
+# Show current value
+scoopz-remote-show
+```
+
+Audio evidence toggle (default is ON):
+
+```bash
+# Keep audio evidence on (recommended if most videos have speech)
 export SCOOPZ_TRANSCRIBE=1
+
+# Or disable audio evidence (frames-only)
+export SCOOPZ_TRANSCRIBE=0
 ```
 
-Tip: to persist these, add them to `~/.bashrc` or put them in `~/scoopz/scoopz_env.sh` and `source` it.
+Then run the picker normally:
+
+```bash
+caption
+```
 
 ## Laptop Setup (Server)
 
