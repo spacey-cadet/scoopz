@@ -1,26 +1,34 @@
-# Scoopz Setup Guide (Current Workflow)
+# Scoopz Setup Guide (Hybrid Evidence Mode)
 
-This guide reflects the current scripts in this project:
-- collector.py
-- newsbreak_captions.py
-- scoopz_env.sh
-- newsbreak_captions.sh (legacy helper)
+This repository contains:
+- collector.py (Termux/phone)
+- newsbreak_captions.py (Termux/phone picker + evidence upload)
+- scoopz_laptop_server.py (laptop “brain”: OCR + Whisper + local LLM)
+- scoopz_env.sh (Termux helper commands)
 
-## What Changed
+## What This Does Now
 
-The workflow is now split into two independent stages:
-1. Collect TikTok videos into the Scoopz folder.
-2. Pick any saved video and generate a NewsBreak-ready caption with Gemini.
+The workflow is split across two devices:
 
-The old upload pipeline referenced in scoopz_env.sh (for example uploader.py, downloads/, data/queue.json) is not present in this repository anymore.
+1) Phone (Termux): download videos + pick exactly 8 + extract a small “evidence pack”
+  - 2 JPEG frames per video
+  - optional short audio clip (for Whisper)
+  - uploads evidence packs to your laptop over Wi‑Fi
+
+2) Laptop: runs OCR + Whisper locally, and uses OpenAI to write captions from text-only evidence
+
+
 
 ## Runtime Overview
 
-- collector.py watches a link inbox file and auto-downloads TikTok videos.
-- newsbreak_captions.py launches a local web picker with thumbnails, then generates caption + hashtags and copies output to clipboard.
-- Both scripts are designed for Termux on Android paths (/sdcard/..., termux-* commands).
+- collector.py watches a link inbox file and downloads TikTok videos to `/sdcard/Pictures/scoopz`.
+- newsbreak_captions.py runs a local web picker on your phone (127.0.0.1:8765).
+- When you press Generate, the phone extracts evidence packs and POSTs them to `SCOOPZ_REMOTE_URL + /batch`.
+- scoopz_laptop_server.py receives the evidence and generates captions locally.
 
-## Prerequisites (Termux)
+## Phone Setup (Termux)
+
+Assumes this repo lives at `~/scoopz` on the phone.
 
 Install required packages:
 
@@ -28,7 +36,17 @@ Install required packages:
 pkg update && pkg upgrade -y
 pkg install -y python ffmpeg termux-api
 pip install --upgrade pip
-pip install requests
+pip install -r ~/scoopz/requirements.txt
+```
+
+Optional (recommended): use a Python virtual environment on Termux:
+
+```bash
+cd ~/scoopz
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -r requirements.txt
 ```
 
 Give Termux storage permission (required for /sdcard access):
@@ -37,77 +55,125 @@ Give Termux storage permission (required for /sdcard access):
 termux-setup-storage
 ```
 
-## Optional: Local Transcription (Recommended)
-
-If you want captions to adapt when there *is* speech, enable local transcription and feed the transcript into Gemini.
-
-The caption script supports two options:
-
-### Option A (Recommended): `whisper.cpp` CLI
-
-This is usually the fastest + most stable on Termux.
-
-Set these environment variables before running [newsbreak_captions.py](newsbreak_captions.py):
-
-- `SCOOPZ_TRANSCRIBE=1`
-- `SCOOPZ_WHISPER_CPP_BIN` (path or command name for the whisper.cpp binary)
-- `SCOOPZ_WHISPER_CPP_MODEL` (path to your model file)
-- `SCOOPZ_WHISPER_LANG=en` (optional)
-
-Example:
-
-```bash
-export SCOOPZ_TRANSCRIBE=1
-export SCOOPZ_WHISPER_CPP_BIN=~/whisper.cpp/main
-export SCOOPZ_WHISPER_CPP_MODEL=~/whisper.cpp/models/ggml-tiny.en.bin
-export SCOOPZ_WHISPER_LANG=en
-```
-
-### Option B: OpenAI Whisper CLI (`whisper`)
-
-This works if you already have it installed, but it can be slower on phones.
-
-```bash
-pip install -U openai-whisper
-export SCOOPZ_TRANSCRIBE=1
-export SCOOPZ_WHISPER_MODEL=tiny
-export SCOOPZ_WHISPER_LANG=en
-```
-
-## Gemini Audio Upload Toggle
-
-By default, [newsbreak_captions.py](newsbreak_captions.py) does **not** upload audio to Gemini (it prefers local transcription).
-
-If you want to upload audio anyway, set:
-
-```bash
-export SCOOPZ_GEMINI_SEND_AUDIO=1
-```
-
-## Required Folders and Files
-
-The code expects these locations:
-
-- Video output folder: /sdcard/Pictures/scoopz
-- URL inbox file: /sdcard/Download/links_inbox.txt
-- Download history file: /sdcard/Download/scoopz_history.log
-- Gemini key file: ~/.config/gemini_key.txt
-
-Create missing files/folders:
+Create required folders/files:
 
 ```bash
 mkdir -p /sdcard/Pictures/scoopz
 mkdir -p /sdcard/Download
-mkdir -p ~/.config
 : > /sdcard/Download/links_inbox.txt
 : > /sdcard/Download/scoopz_history.log
 ```
 
-Add your Gemini API key:
+Set your laptop server URL (replace with your laptop IP):
 
 ```bash
-echo "YOUR_GEMINI_API_KEY" > ~/.config/gemini_key.txt
-chmod 600 ~/.config/gemini_key.txt
+export SCOOPZ_REMOTE_URL="http://192.168.0.103:9000"
+```
+
+Audio upload toggle (recommended ON if most videos have speech):
+
+```bash
+export SCOOPZ_TRANSCRIBE=1
+```
+
+Tip: to persist these, add them to `~/.bashrc` or put them in `~/scoopz/scoopz_env.sh` and `source` it.
+
+## Laptop Setup (Server)
+
+Assumes this repo lives on your laptop (any path is fine). If you have the repo open in VS Code on the laptop already, you’re good.
+
+Install base dependencies (Ubuntu/Debian example):
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-pip ffmpeg git build-essential cmake
+sudo apt install -y tesseract-ocr  # optional but recommended for on-screen text
+```
+
+Recommended: create a Python virtual environment for the server:
+
+```bash
+cd /path/to/scoopz
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -r requirements.txt
+```
+
+You also need local model binaries:
+
+- whisper.cpp (`whisper-cli`) + a ggml model (base.en/tiny.en)
+
+### Build whisper.cpp (CPU)
+
+```bash
+cd ~/Downloads
+git clone https://github.com/ggerganov/whisper.cpp
+cd whisper.cpp
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+
+# download a model (base.en is a good default)
+bash ./models/download-ggml-model.sh base.en
+
+# optional: put whisper-cli on PATH
+mkdir -p ~/bin
+cp -f build/bin/whisper-cli ~/bin/
+echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
+```
+
+Important: both projects may also build a generic binary called `main`. Avoid using `main` for Scoopz to prevent running the wrong executable.
+
+Set required env vars on the laptop:
+
+```bash
+export SCOOPZ_TRANSCRIBE=1
+export SCOOPZ_WHISPER_BIN="$HOME/bin/whisper-cli"
+export SCOOPZ_WHISPER_MODEL="$HOME/Downloads/whisper.cpp/models/ggml-base.en.bin"
+export SCOOPZ_SERVER_PORT=9000
+
+# OpenAI caption generation (required)
+export SCOOPZ_OPENAI_API_KEY="YOUR_KEY_HERE"
+export SCOOPZ_OPENAI_MODEL="gpt-4o-mini"   # change if you prefer
+export SCOOPZ_OPENAI_TIMEOUT_S=120
+export SCOOPZ_OPENAI_TEMP=0.8
+
+# Controls response length
+export SCOOPZ_LLM_MAX_TOKENS=900
+```
+
+Data sent to OpenAI:
+- OCR text extracted from frames (lower-thirds/tickers)
+- Whisper transcript text (if enabled)
+- The caption-formatting prompt
+
+Data NOT sent to OpenAI:
+- Images, audio, or video files
+
+Start the server:
+
+```bash
+python3 scoopz_laptop_server.py
+```
+
+Make sure your firewall allows inbound TCP `9000` on your LAN. If you use `ufw`:
+
+```bash
+sudo ufw allow 9000/tcp
+```
+
+Confirm the server is running locally:
+
+```bash
+curl http://127.0.0.1:9000/health
+```
+
+You should see: `{ "ok": true }`.
+
+Then confirm your phone can reach it over Wi‑Fi:
+
+```bash
+curl http://<LAPTOP_IP>:9000/health
 ```
 
 ## Daily Workflow
@@ -134,25 +200,23 @@ How to feed links:
 
 ### Step 2: Generate captions
 
-In another Termux session:
+In another Termux session (ensure `SCOOPZ_REMOTE_URL` is set):
 
 ```bash
 python newsbreak_captions.py
 ```
 
 What happens:
-- Script scans /sdcard/Pictures/scoopz for mp4 files.
-- It generates thumbnail previews in /sdcard/Pictures/scoopz/.thumbs.
-- It starts local server on 127.0.0.1:8765.
-- A persistent notification opens the picker page.
-- Tap a video card to process that video.
-- The selected video is compressed, uploaded to Gemini, analyzed, then deleted from Gemini.
-- Output is returned as:
-  - caption
-  - hashtags
-- Final text is clipped to max 150 characters and copied to clipboard.
+- Script scans `/sdcard/Pictures/scoopz` for mp4 files.
+- Generates thumbnails in `/sdcard/Pictures/scoopz/.thumbs`.
+- Starts local picker server on `127.0.0.1:8765`.
+- You select exactly 8 videos.
+- Phone extracts 2 frames (+ optional audio) per selected video.
+- Phone uploads evidence packs to the laptop server.
+- Laptop generates captions and returns them.
+- Phone copies captions to clipboard sequentially.
 
-## How the Code Works
+## Notes
 
 ## collector.py
 
@@ -174,30 +238,7 @@ Important settings at top:
 - POLL_RATE = 0.5
 - TIKWM_API = https://www.tikwm.com/api/
 
-## newsbreak_captions.py
-
-Main responsibilities:
-- UI and video selection:
-  - build_html() renders mobile grid UI.
-  - Handler.do_GET() handles /, /pick, /status.
-- Thumbnail pipeline:
-  - generate_thumbnails() uses ffmpeg to create first-frame jpg.
-- Gemini pipeline:
-  - compress_video() reduces upload size.
-  - upload_video() uploads via resumable API.
-  - wait_for_processing() waits for ACTIVE state.
-  - generate_caption() sends prompt and retries on 429 limits.
-  - format_result() enforces 150-char combined output.
-  - delete_file() removes uploaded Gemini file.
-- Clipboard and UX:
-  - copy_to_clipboard() stores final result.
-  - notify() and toast() provide status updates.
-
-Important settings at top:
-- MODEL = gemini-2.5-flash
-- SCOOPZ_DIR = /sdcard/Pictures/scoopz
-- TEMP_COMPRESSED = /sdcard/Download/nb_caption_compressed.mp4
-- PORT = 8765
+If captions fail with “Set SCOOPZ_REMOTE_URL…”, set it in the same Termux session (or add it to your `~/.bashrc` / `scoopz_env.sh`).
 
 ## Helper scripts
 
@@ -240,8 +281,13 @@ python newsbreak_captions.py
 - Collector does not download:
   - Confirm links are valid TikTok URLs.
   - Confirm links are being written to /sdcard/Download/links_inbox.txt.
-- Caption script exits with key error:
-  - Check ~/.config/gemini_key.txt exists and is non-empty.
+- Phone says “Set SCOOPZ_REMOTE_URL…” or batch fails immediately:
+  - Export `SCOOPZ_REMOTE_URL` in the same Termux session running the picker.
+  - Verify laptop server is running and reachable: `curl http://<LAPTOP_IP>:9000/health`.
+- Laptop server runs but phone can’t connect:
+  - Ensure both devices are on the same Wi‑Fi.
+  - Allow port 9000 in firewall (`sudo ufw allow 9000/tcp`).
+  - Use the laptop’s LAN IP (usually `192.168.x.x`), not `127.0.0.1`.
 - Port conflict on 8765:
   - Script already tries to kill previous listener; restart script if needed.
 - Clipboard not updating:
@@ -249,9 +295,8 @@ python newsbreak_captions.py
 
 ## Minimal End-to-End Test
 
-1. Start collector.py.
-2. Add one TikTok URL to /sdcard/Download/links_inbox.txt.
-3. Confirm an mp4 appears in /sdcard/Pictures/scoopz.
-4. Start newsbreak_captions.py.
-5. Open picker from notification, tap video, wait for "Caption Ready".
-6. Paste clipboard output into Notes to confirm result format.
+1. On laptop: start `python3 scoopz_laptop_server.py` and confirm `curl http://127.0.0.1:9000/health` works.
+2. On phone: confirm `curl http://<LAPTOP_IP>:9000/health` works.
+3. On phone: run `python collector.py` and add TikTok links to `/sdcard/Download/links_inbox.txt` until you have at least 8 mp4s.
+4. On phone: run `python newsbreak_captions.py`, open the picker, select exactly 8 videos, and tap Generate.
+5. Confirm captions are copied to clipboard one-by-one.

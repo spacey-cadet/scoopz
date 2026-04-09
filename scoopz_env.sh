@@ -7,6 +7,14 @@
 # ══════════════════════════════════════════════════════
 export SCOOPZ_DIR="$HOME/scoopz"
 
+# ── Hybrid Evidence Mode (phone → laptop) ───────────────────────────────────
+# Set this to your laptop server base URL (run `python3 scoopz_laptop_server.py` on laptop)
+# Example: export SCOOPZ_REMOTE_URL="http://192.168.0.103:9000"
+export SCOOPZ_REMOTE_URL="${SCOOPZ_REMOTE_URL:-}"
+
+# If 1: phone extracts short audio clips for laptop Whisper. If 0: frames only.
+export SCOOPZ_TRANSCRIBE="${SCOOPZ_TRANSCRIBE:-1}"
+
 # ── collect ───────────────────────────────────────────────────────────────────
 collect() {
     echo "📋 Starting collector — browse TikTok and Share → Copy Link"

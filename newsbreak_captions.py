@@ -2,10 +2,10 @@
 """
 Scoopz Caption Generator — v4
 ═══════════════════════════════════════════════════════════════════════════════
-Stack  : ffmpeg → frame descriptions (text) + Whisper transcript → Gemini batch
-Gemini : TEXT ONLY — zero images, zero audio bytes sent to API
+Stack  : ffmpeg → frame descriptions (text) + Whisper transcript → local LLM batch
+Local  : TEXT ONLY — zero images, zero audio bytes sent to any API
 Batch  : Exactly 8 videos per run. UI enforces this hard cap.
-Target : ~5-8s total for 8 captions (one Gemini call, text payload only)
+Target : ~≤2 min total for 8 captions (one local LLM call, text payload only)
 ═══════════════════════════════════════════════════════════════════════════════
 """
 import subprocess
@@ -26,11 +26,19 @@ from contextlib import contextmanager
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
-# ── Config ────────────────────────────────────────────────────────────────────
-KEY_FILE            = os.path.expanduser("~/.config/gemini_key.txt")
-GEMINI_MODEL        = "gemini-2.5-flash-lite"
-GEMINI_BASE         = "https://generativelanguage.googleapis.com/v1beta/models"
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    v = os.environ.get(name, "1" if default else "0").strip().lower()
+    return v in ("1", "true", "yes", "y", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)).strip())
+    except Exception:
+        return default
+
+# ── Config ────────────────────────────────────────────────────────────────────
 POV_STATE_FILE       = os.path.expanduser("~/.cache/scoopz_caption_pov.json")
 USER_EXAMPLES_FILE   = os.path.expanduser("~/.config/scoopz_caption_examples.txt")
 STYLE_MEMORY_FILE    = os.path.expanduser("~/.cache/scoopz_caption_style_memory.json")
@@ -246,11 +254,6 @@ def copy_to_clipboard(text: str) -> bool:
     return False
 
 
-def load_api_key() -> str:
-    with open(KEY_FILE) as f:
-        return f.read().strip()
-
-
 def kill_port(port: int):
     import glob
     try:
@@ -310,6 +313,71 @@ def cleanup_slot(slot: int):
 def cleanup_all():
     for slot in range(BATCH_CAP):
         cleanup_slot(slot)
+
+
+def _file_b64(path: str) -> str:
+    try:
+        with open(path, "rb") as f:
+            return base64.b64encode(f.read()).decode("ascii")
+    except Exception:
+        return ""
+
+
+def extract_evidence(vpath: str, slot: int) -> dict:
+    """Extract evidence pack for remote processing: 2 frames + optional audio.
+
+    This keeps the phone fast: no OCR, no Whisper, no LLM locally.
+    """
+    def _attempt():
+        paths = _slot_paths(slot)
+
+        transcribe_on = os.environ.get("SCOOPZ_TRANSCRIBE", "1").strip() not in ("0", "false", "False")
+
+        f1_box, f2_box, audio_ok_box = [None], [None], [False]
+
+        def _frames():
+            r1, r2 = extract_best_frames(vpath, slot)
+            f1_box[0], f2_box[0] = r1, r2
+
+        def _audio():
+            if not transcribe_on:
+                audio_ok_box[0] = False
+                return
+            extract_audio(vpath, paths["audio"])
+            audio_ok_box[0] = (
+                os.path.exists(paths["audio"]) and
+                os.path.getsize(paths["audio"]) > 500
+            )
+
+        tf = threading.Thread(target=_frames, daemon=True)
+        ta = threading.Thread(target=_audio,  daemon=True)
+        tf.start(); ta.start()
+        tf.join();  ta.join()
+
+        f1, f2 = f1_box[0], f2_box[0]
+        if not f1:
+            raise ValueError("frame extraction failed")
+
+        return {
+            "vpath": vpath,
+            "f1": f1,
+            "f2": f2 or "",
+            "audio": paths["audio"] if audio_ok_box[0] else "",
+            "ok": True,
+            "error": "",
+        }
+
+    for attempt in range(2):
+        try:
+            cleanup_slot(slot)
+            return _attempt()
+        except Exception as e:
+            if attempt == 0:
+                time.sleep(0.5)
+            else:
+                return {"vpath": vpath, "f1": "", "f2": "", "audio": "", "ok": False, "error": str(e)[:80]}
+
+    return {"vpath": vpath, "f1": "", "f2": "", "audio": "", "ok": False, "error": "unknown"}
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -553,7 +621,7 @@ def extract_best_frames(vpath: str, slot: int) -> tuple:
 
 # ══════════════════════════════════════════════════════════════════════════════
 # FRAME → TEXT DESCRIPTION
-# (This replaces sending images to Gemini — text only hits the API)
+# (Signalstats + optional OCR; no online APIs)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _signalstats(frame_path: str) -> dict:
@@ -633,7 +701,7 @@ def _saturation_label(satavg: float) -> str:
 
 def describe_frame(frame_path: str, frame_num: int) -> str:
     """
-    Build a compact text description of a frame for the Gemini prompt.
+    Build a compact text description of a frame for the LLM prompt.
     Uses only ffmpeg signalstats + optional tesseract OCR — no vision model.
 
     Output example:
@@ -714,12 +782,30 @@ def transcribe(audio_path: str, trim_path: str) -> str:
         src = audio_path
 
     # whisper.cpp binary
-    model_path = os.path.expanduser("~/.local/share/whisper/ggml-base.en.bin")
-    for binary in ("whisper-cli", "whisper_cpp", "main"):
-        if shutil.which(binary) and os.path.exists(model_path):
+    # IMPORTANT: do not auto-fall back to a generic binary name like `main`.
+    # Both whisper.cpp and llama.cpp may build a `main` binary, so using `main`
+    # here can accidentally execute the wrong program.
+    #
+    # If you built whisper.cpp from source, set:
+    #   SCOOPZ_WHISPER_BIN=/path/to/whisper-cli
+    # and optionally:
+    #   SCOOPZ_WHISPER_MODEL=/path/to/ggml-*.bin
+    model_path = os.environ.get(
+        "SCOOPZ_WHISPER_MODEL",
+        os.path.expanduser("~/.local/share/whisper/ggml-base.en.bin"),
+    ).strip()
+    forced_bin = os.environ.get("SCOOPZ_WHISPER_BIN", "").strip()
+    bin_candidates = [forced_bin] if forced_bin else []
+    bin_candidates += ["whisper-cli", "whisper_cpp"]
+
+    for binary in bin_candidates:
+        if not binary:
+            continue
+        bin_path = shutil.which(binary) if os.path.basename(binary) == binary else binary
+        if bin_path and os.path.exists(model_path):
             try:
                 r = subprocess.run(
-                    [binary, "-m", model_path, "-f", src,
+                    [bin_path, "-m", model_path, "-f", src,
                      "--output-txt", "--no-timestamps", "-"],
                     capture_output=True, timeout=60, text=True, check=False,
                 )
@@ -780,6 +866,8 @@ def extract_video(vpath: str, slot: int) -> dict:
     def _attempt():
         paths = _slot_paths(slot)
 
+        transcribe_on = os.environ.get("SCOOPZ_TRANSCRIBE", "1").strip() not in ("0", "false", "False")
+
         # Frames + audio in parallel
         f1_box, f2_box, audio_ok_box = [None], [None], [False]
 
@@ -788,6 +876,9 @@ def extract_video(vpath: str, slot: int) -> dict:
             f1_box[0], f2_box[0] = r1, r2
 
         def _audio():
+            if not transcribe_on:
+                audio_ok_box[0] = False
+                return
             extract_audio(vpath, paths["audio"])
             audio_ok_box[0] = (
                 os.path.exists(paths["audio"]) and
@@ -808,7 +899,7 @@ def extract_video(vpath: str, slot: int) -> dict:
 
         # Transcribe (sequential, after audio extraction)
         transcript = ""
-        if audio_ok_box[0]:
+        if transcribe_on and audio_ok_box[0]:
             transcript = transcribe(paths["audio"], paths["trim"])
 
         return {
@@ -900,7 +991,7 @@ def _load_user_examples() -> list:
 def build_batch_prompt(items: list) -> str:
     """
     items: list of dicts with keys: pov_mode, frame_desc, transcript
-    Returns full text-only prompt for one Gemini call.
+    Returns a single text-only prompt for one local LLM call.
     """
     n = len(items)
     lines = [BATCH_PROMPT_HEADER.format(N=n)]
@@ -923,51 +1014,83 @@ def build_batch_prompt(items: list) -> str:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# GEMINI — TEXT ONLY
+# LOCAL LLM (llama.cpp) — TEXT ONLY
 # ══════════════════════════════════════════════════════════════════════════════
 
-def gemini_call(api_key: str, prompt: str, max_tokens: int = 7200) -> str:
-    """
-    Pure text-in, text-out Gemini call.
-    No images. No audio bytes. Just the prompt string.
-    Exponential backoff: 10s → 30s → 60s → 120s.
-    """
-    url     = f"{GEMINI_BASE}/{GEMINI_MODEL}:generateContent"
-    headers = {"Content-Type": "application/json", "x-goog-api-key": api_key}
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature":    1.0,
-            "maxOutputTokens": max_tokens,
-        },
-    }
-    delays = [10, 30, 60, 120]
+def _pick_llama_binary() -> str:
+    """Pick a llama.cpp-style CLI binary from PATH (best-effort)."""
+    forced = os.environ.get("SCOOPZ_LLAMA_BIN", "").strip()
+    if forced:
+        return forced
+    for cand in ("llama-cli", "main"):
+        p = shutil.which(cand)
+        if p:
+            return p
+    return ""
 
-    for attempt, delay in enumerate(delays + [None]):
-        try:
-            resp = requests.post(url, headers=headers, json=payload, timeout=45)
-            if resp.status_code == 429:
-                wait = delay if delay is not None else 180
-                print(f"⚠️  Gemini 429 — waiting {wait}s")
-                time.sleep(wait)
-                continue
-            if resp.status_code >= 500:
-                wait = delay if delay is not None else 180
-                print(f"⚠️  Gemini {resp.status_code} — waiting {wait}s")
-                time.sleep(wait)
-                continue
-            resp.raise_for_status()
-            return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
-        except requests.exceptions.Timeout:
-            print(f"⚠️  Gemini timeout (attempt {attempt + 1})")
-            if delay is not None:
-                time.sleep(delay)
-        except Exception as e:
-            print(f"⚠️  Gemini error: {e}")
-            if delay is not None:
-                time.sleep(delay)
 
-    raise ValueError("Gemini failed after all retries")
+def local_llm_call(prompt: str, *, max_tokens: int) -> str:
+    """Local text generation via llama.cpp (no network).
+
+    Required env vars:
+      - SCOOPZ_LLAMA_MODEL: path to a GGUF model file
+
+    Optional env vars:
+      - SCOOPZ_LLAMA_BIN: path/name for llama.cpp cli (otherwise tries llama-cli/main)
+      - SCOOPZ_LLAMA_THREADS (default 4)
+      - SCOOPZ_LLAMA_CTX (default 4096)
+      - SCOOPZ_LLAMA_TEMP (default 0.9)
+      - SCOOPZ_LLAMA_TOP_P (default 0.9)
+      - SCOOPZ_LLAMA_REPEAT_PENALTY (default 1.1)
+      - SCOOPZ_LLAMA_TIMEOUT_S (default 150)
+    """
+    model = os.environ.get("SCOOPZ_LLAMA_MODEL", "").strip()
+    if not model:
+        raise ValueError("Local LLM selected but SCOOPZ_LLAMA_MODEL is not set")
+    if not os.path.exists(model):
+        raise ValueError(f"Local model not found: {model}")
+
+    bin_path = _pick_llama_binary()
+    if not bin_path:
+        raise ValueError("Local LLM selected but llama.cpp binary not found (need `llama-cli` or `main`)"
+                         "+ set SCOOPZ_LLAMA_BIN if needed")
+
+    # Galaxy A04 is on the slower side; keep defaults conservative.
+    threads = _env_int("SCOOPZ_LLAMA_THREADS", 4)
+    ctx     = _env_int("SCOOPZ_LLAMA_CTX", 4096)
+    timeout = _env_int("SCOOPZ_LLAMA_TIMEOUT_S", 150)
+
+    try:
+        temp = float(os.environ.get("SCOOPZ_LLAMA_TEMP", "0.9").strip())
+    except Exception:
+        temp = 0.9
+    try:
+        top_p = float(os.environ.get("SCOOPZ_LLAMA_TOP_P", "0.9").strip())
+    except Exception:
+        top_p = 0.9
+    try:
+        rep_pen = float(os.environ.get("SCOOPZ_LLAMA_REPEAT_PENALTY", "1.1").strip())
+    except Exception:
+        rep_pen = 1.1
+
+    # Keep args conservative + widely compatible across llama.cpp builds.
+    cmd = [
+        bin_path,
+        "-m", model,
+        "-p", prompt,
+        "-n", str(max_tokens),
+        "-t", str(max(1, threads)),
+        "--ctx-size", str(max(512, ctx)),
+        "--temp", str(temp),
+        "--top-p", str(top_p),
+        "--repeat-penalty", str(rep_pen),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+    out = (r.stdout or "").strip()
+    if not out:
+        err = (r.stderr or "").strip()
+        raise ValueError(f"Local LLM returned no output (exit={r.returncode}): {err[:160]}")
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1012,7 +1135,7 @@ def _limit_emojis(text: str, cap: int) -> str:
 
 def _parse_video_blocks(raw: str, n: int) -> list:
     """
-    Split raw Gemini response into per-video (caption, hashtags) pairs.
+    Split raw LLM response into per-video (caption, hashtags) pairs.
     Handles markdown bolding, missing colons, irregular spacing.
     Returns list of length n; missing entries are ("", "").
     """
@@ -1556,7 +1679,7 @@ function updateUI() {{
 async function generate() {{
   if (sel.size !== CAP) return;
   const indices = Array.from(sel.keys());
-  showOverlay('Generating {BATCH_CAP} captions...', 'Extracting frames & transcribing...');
+    showOverlay('Generating {BATCH_CAP} captions...', 'Extracting frames & audio...');
   const ok = await fetch('/batch', {{
     method:  'POST',
     headers: {{'Content-Type': 'application/json'}},
@@ -1583,7 +1706,7 @@ async function pollStatus(maxTries) {{
     const detail = st.detail || '';
     document.getElementById('ovStep').textContent =
       stage === 'extracting'  ? ('Extracting: ' + detail) :
-      stage === 'generating'  ? 'Calling Gemini (text only)...' :
+    stage === 'generating'  ? 'Generating on laptop...' :
       stage === 'copying'     ? ('Copying captions: ' + detail) :
       detail || 'Processing...';
     if (stage === 'done') {{
@@ -1639,7 +1762,6 @@ class ReusableServer(HTTPServer):
 
 class Handler(BaseHTTPRequestHandler):
     videos         = []
-    api_key        = ""
     error_occurred = False
 
     def log_message(self, *a):
@@ -1714,22 +1836,21 @@ class Handler(BaseHTTPRequestHandler):
 # MAIN PROCESSING LOOP
 # ══════════════════════════════════════════════════════════════════════════════
 
-def run_batch(api_key: str, video_indices: list, all_videos: list, perf: dict):
+def run_batch(video_indices: list, all_videos: list, perf: dict):
     """
     Full pipeline for one batch of BATCH_CAP videos.
-    1. Extract all videos in parallel threads (frames + audio + transcript)
-    2. Build text descriptions for each
-    3. One text-only Gemini call
-    4. Parse + sanitise results
-    5. Copy each caption sequentially with 1.5s gap
+    1. Extract evidence on phone (2 frames + optional audio) in parallel
+    2. Upload evidence to laptop (/batch)
+    3. Laptop runs OCR + Whisper + local LLM and returns captions
+    4. Copy each caption sequentially with 1.5s gap
     """
     n = len(video_indices)
-    results    = {}  # slot → extraction dict
+    results    = {}  # slot → evidence dict
     lock       = threading.Lock()
     completed  = [0]
 
     def _extract(slot: int, vpath: str):
-        r = extract_video(vpath, slot)
+        r = extract_evidence(vpath, slot)
         with lock:
             results[slot] = r
             completed[0] += 1
@@ -1756,33 +1877,44 @@ def run_batch(api_key: str, video_indices: list, all_videos: list, perf: dict):
     if not success_slots:
         raise ValueError("All videos failed extraction")
 
-    # Build pov modes + prompt items for successes
-    pov_modes  = [next_pov_mode() for _ in success_slots]
-    prompt_items = [
-        {
-            "pov_mode":   pov_modes[i],
-            "frame_desc": results[slot]["frame_desc"],
-            "transcript": results[slot]["transcript"],
-        }
-        for i, slot in enumerate(success_slots)
-    ]
+    remote = os.environ.get("SCOOPZ_REMOTE_URL", "").strip().rstrip("/")
+    if not remote:
+        raise ValueError("Set SCOOPZ_REMOTE_URL to your laptop server, e.g. http://192.168.0.103:9000")
 
-    set_stage("generating", f"{len(success_slots)} captions")
-    toast("Calling Gemini...")
+    # Build upload payload (base64 evidence pack)
+    set_stage("generating", f"Uploading {len(success_slots)}")
+    with _timer(perf, "upload"):
+        items = []
+        for i, slot in enumerate(success_slots, 1):
+            ev = results[slot]
+            set_stage("generating", f"Uploading {i}/{len(success_slots)}")
+            items.append({
+                "name": os.path.basename(ev.get("vpath") or f"video_{i}.mp4"),
+                "f1_b64": _file_b64(ev.get("f1") or ""),
+                "f2_b64": _file_b64(ev.get("f2") or "") if (ev.get("f2") or "") else "",
+                "audio_b64": _file_b64(ev.get("audio") or "") if (ev.get("audio") or "") else "",
+            })
 
-    with _timer(perf, "gemini"):
-        prompt   = build_batch_prompt(prompt_items)
-        raw      = gemini_call(api_key, prompt, max_tokens=900 * len(success_slots))
-
-    with _timer(perf, "format"):
-        captions = format_batch_results(raw, pov_modes)
+    set_stage("generating", "Processing on laptop")
+    with _timer(perf, "remote"):
+        resp = requests.post(
+            remote + "/batch",
+            json={"items": items},
+            timeout=180,
+        )
+        resp.raise_for_status()
+        data = resp.json() if resp.content else {}
+        captions = data.get("captions") or []
 
     # Pair captions with video paths
+    if not isinstance(captions, list):
+        captions = []
+
     final = []  # (vpath, caption)
     for i, slot in enumerate(success_slots):
         final.append((results[slot]["vpath"], captions[i] if i < len(captions) else ""))
     for slot in failed_slots:
-        final.append((results[slot]["vpath"], ""))  # empty = failed
+        final.append((results[slot]["vpath"], ""))
 
     # Copy to clipboard sequentially
     set_stage("copying", f"0/{len(final)}")
@@ -1814,12 +1946,6 @@ def main():
     global batch_job
 
     try:
-        api_key = load_api_key()
-    except FileNotFoundError:
-        notify("Error", "No API key at ~/.config/gemini_key.txt", "nb_error")
-        sys.exit(1)
-
-    try:
         videos = load_videos()
     except Exception as e:
         notify("Error", str(e)[:60], "nb_error")
@@ -1839,7 +1965,6 @@ def main():
         print(f"⚠️  Only {len(videos)} readable videos found (need {BATCH_CAP} to fill a batch)")
 
     Handler.videos  = videos
-    Handler.api_key = api_key
 
     kill_port(PORT)
     srv = ReusableServer(("127.0.0.1", PORT), Handler)
@@ -1874,7 +1999,7 @@ def main():
         perf: dict = {}
 
         try:
-            run_batch(api_key, job, videos, perf)
+            run_batch(job, videos, perf)
         except Exception as e:
             err = str(e)[:100]
             print(f"\nERROR: {err}\n")
