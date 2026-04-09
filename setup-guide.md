@@ -10,7 +10,7 @@ This guide reflects the current scripts in this project:
 
 The workflow is now split into two independent stages:
 1. Collect TikTok videos into the Scoopz folder.
-2. Pick any saved video and generate a NewsBreak-ready caption with OpenAI.
+2. Pick any saved video and generate a NewsBreak-ready caption with Gemini.
 
 The old upload pipeline referenced in scoopz_env.sh (for example uploader.py, downloads/, data/queue.json) is not present in this repository anymore.
 
@@ -37,6 +37,53 @@ Give Termux storage permission (required for /sdcard access):
 termux-setup-storage
 ```
 
+## Optional: Local Transcription (Recommended)
+
+If you want captions to adapt when there *is* speech, enable local transcription and feed the transcript into Gemini.
+
+The caption script supports two options:
+
+### Option A (Recommended): `whisper.cpp` CLI
+
+This is usually the fastest + most stable on Termux.
+
+Set these environment variables before running [newsbreak_captions.py](newsbreak_captions.py):
+
+- `SCOOPZ_TRANSCRIBE=1`
+- `SCOOPZ_WHISPER_CPP_BIN` (path or command name for the whisper.cpp binary)
+- `SCOOPZ_WHISPER_CPP_MODEL` (path to your model file)
+- `SCOOPZ_WHISPER_LANG=en` (optional)
+
+Example:
+
+```bash
+export SCOOPZ_TRANSCRIBE=1
+export SCOOPZ_WHISPER_CPP_BIN=~/whisper.cpp/main
+export SCOOPZ_WHISPER_CPP_MODEL=~/whisper.cpp/models/ggml-tiny.en.bin
+export SCOOPZ_WHISPER_LANG=en
+```
+
+### Option B: OpenAI Whisper CLI (`whisper`)
+
+This works if you already have it installed, but it can be slower on phones.
+
+```bash
+pip install -U openai-whisper
+export SCOOPZ_TRANSCRIBE=1
+export SCOOPZ_WHISPER_MODEL=tiny
+export SCOOPZ_WHISPER_LANG=en
+```
+
+## Gemini Audio Upload Toggle
+
+By default, [newsbreak_captions.py](newsbreak_captions.py) does **not** upload audio to Gemini (it prefers local transcription).
+
+If you want to upload audio anyway, set:
+
+```bash
+export SCOOPZ_GEMINI_SEND_AUDIO=1
+```
+
 ## Required Folders and Files
 
 The code expects these locations:
@@ -44,7 +91,7 @@ The code expects these locations:
 - Video output folder: /sdcard/Pictures/scoopz
 - URL inbox file: /sdcard/Download/links_inbox.txt
 - Download history file: /sdcard/Download/scoopz_history.log
-- OpenAI key file: ~/.config/openai_key.txt (or use OPENAI_API_KEY)
+- Gemini key file: ~/.config/gemini_key.txt
 
 Create missing files/folders:
 
@@ -56,17 +103,11 @@ mkdir -p ~/.config
 : > /sdcard/Download/scoopz_history.log
 ```
 
-Add your OpenAI API key (recommended: env var):
+Add your Gemini API key:
 
 ```bash
-export OPENAI_API_KEY="YOUR_OPENAI_API_KEY"
-```
-
-Or store it in a file:
-
-```bash
-echo "YOUR_OPENAI_API_KEY" > ~/.config/openai_key.txt
-chmod 600 ~/.config/openai_key.txt
+echo "YOUR_GEMINI_API_KEY" > ~/.config/gemini_key.txt
+chmod 600 ~/.config/gemini_key.txt
 ```
 
 ## Daily Workflow
@@ -105,8 +146,7 @@ What happens:
 - It starts local server on 127.0.0.1:8765.
 - A persistent notification opens the picker page.
 - Tap a video card to process that video.
-- The script extracts 2 frames + a short audio clip locally with ffmpeg.
-- It (optionally) transcribes the audio via OpenAI, then calls an OpenAI vision model using the frames.
+- The selected video is compressed, uploaded to Gemini, analyzed, then deleted from Gemini.
 - Output is returned as:
   - caption
   - hashtags
@@ -142,23 +182,21 @@ Main responsibilities:
   - Handler.do_GET() handles /, /pick, /status.
 - Thumbnail pipeline:
   - generate_thumbnails() uses ffmpeg to create first-frame jpg.
-- OpenAI pipeline:
-  - extract_parallel() creates 2 frames + an audio clip.
-  - generate_caption() optionally transcribes audio, then calls OpenAI chat completions with images.
-  - format_result() parses/normalizes the 3 candidates and enforces the output rules.
+- Gemini pipeline:
+  - compress_video() reduces upload size.
+  - upload_video() uploads via resumable API.
+  - wait_for_processing() waits for ACTIVE state.
+  - generate_caption() sends prompt and retries on 429 limits.
+  - format_result() enforces 150-char combined output.
+  - delete_file() removes uploaded Gemini file.
 - Clipboard and UX:
   - copy_to_clipboard() stores final result.
   - notify() and toast() provide status updates.
 
 Important settings at top:
-- OPENAI_BASE (env: SCOOPZ_OPENAI_BASE)
-- SCOOPZ_OPENAI_MODEL (default: gpt-4o-mini)
-- SCOOPZ_OPENAI_TRANSCRIBE_MODEL (default: whisper-1)
-- SCOOPZ_TRANSCRIBE_AUDIO (set to 0 to skip transcription)
+- MODEL = gemini-2.5-flash
 - SCOOPZ_DIR = /sdcard/Pictures/scoopz
-- TEMP_FRAME_1 = /sdcard/Download/nb_frame1.jpg
-- TEMP_FRAME_2 = /sdcard/Download/nb_frame2.jpg
-- TEMP_AUDIO = /sdcard/Download/nb_audio.mp3
+- TEMP_COMPRESSED = /sdcard/Download/nb_caption_compressed.mp4
 - PORT = 8765
 
 ## Helper scripts
@@ -203,7 +241,7 @@ python newsbreak_captions.py
   - Confirm links are valid TikTok URLs.
   - Confirm links are being written to /sdcard/Download/links_inbox.txt.
 - Caption script exits with key error:
-  - Check OPENAI_API_KEY is set, or ~/.config/openai_key.txt exists and is non-empty.
+  - Check ~/.config/gemini_key.txt exists and is non-empty.
 - Port conflict on 8765:
   - Script already tries to kill previous listener; restart script if needed.
 - Clipboard not updating:
