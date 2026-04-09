@@ -37,6 +37,53 @@ Give Termux storage permission (required for /sdcard access):
 termux-setup-storage
 ```
 
+## Optional: Local Transcription (Recommended)
+
+If you want captions to adapt when there *is* speech, enable local transcription and feed the transcript into Gemini.
+
+The caption script supports two options:
+
+### Option A (Recommended): `whisper.cpp` CLI
+
+This is usually the fastest + most stable on Termux.
+
+Set these environment variables before running [newsbreak_captions.py](newsbreak_captions.py):
+
+- `SCOOPZ_TRANSCRIBE=1`
+- `SCOOPZ_WHISPER_CPP_BIN` (path or command name for the whisper.cpp binary)
+- `SCOOPZ_WHISPER_CPP_MODEL` (path to your model file)
+- `SCOOPZ_WHISPER_LANG=en` (optional)
+
+Example:
+
+```bash
+export SCOOPZ_TRANSCRIBE=1
+export SCOOPZ_WHISPER_CPP_BIN=~/whisper.cpp/main
+export SCOOPZ_WHISPER_CPP_MODEL=~/whisper.cpp/models/ggml-tiny.en.bin
+export SCOOPZ_WHISPER_LANG=en
+```
+
+### Option B: OpenAI Whisper CLI (`whisper`)
+
+This works if you already have it installed, but it can be slower on phones.
+
+```bash
+pip install -U openai-whisper
+export SCOOPZ_TRANSCRIBE=1
+export SCOOPZ_WHISPER_MODEL=tiny
+export SCOOPZ_WHISPER_LANG=en
+```
+
+## Gemini Audio Upload Toggle
+
+By default, [newsbreak_captions.py](newsbreak_captions.py) does **not** upload audio to Gemini (it prefers local transcription).
+
+If you want to upload audio anyway, set:
+
+```bash
+export SCOOPZ_GEMINI_SEND_AUDIO=1
+```
+
 ## Required Folders and Files
 
 The code expects these locations:
