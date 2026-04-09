@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 NewsBreak Caption Generator
-Stack: ffmpeg (parallel) → 2 frames + audio clip → single Gemini call → caption
+Stack: ffmpeg (parallel) → 2 frames + audio clip → OpenAI (transcribe + vision) → caption
 Target: 8-15s per video
 """
 import subprocess
@@ -19,9 +19,13 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 
 # ── Config ───────────────────────────────────────────────
-KEY_FILE     = os.path.expanduser("~/.config/gemini_key.txt")
-GEMINI_MODEL = "gemini-2.5-flash-lite"  # FIXED: Use stable model
-GEMINI_BASE  = "https://generativelanguage.googleapis.com/v1beta/models"
+# OpenAI auth:
+# - Prefer env vars: SCOOPZ_OPENAI_API_KEY or OPENAI_API_KEY
+# - Fallback to key file: ~/.config/openai_key.txt
+KEY_FILE = os.path.expanduser(os.environ.get("SCOOPZ_OPENAI_KEY_FILE", "~/.config/openai_key.txt"))
+
+# OpenAI API settings (override via env if desired)
+OPENAI_BASE = os.environ.get("SCOOPZ_OPENAI_BASE", "https://api.openai.com/v1").rstrip("/")
 
 # Persist POV alternation across runs (2nd person ↔ 3rd person)
 POV_STATE_FILE = os.path.expanduser("~/.cache/scoopz_caption_pov.json")
@@ -320,8 +324,11 @@ def copy_to_clipboard(text):
     return False
 
 def load_api_key():
-    with open(KEY_FILE) as f:
-        return f.read().strip()
+    key = (os.environ.get("SCOOPZ_OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip()
+    if key:
+        return key
+    with open(KEY_FILE, "r", encoding="utf-8") as f:
+        return (f.read() or "").strip()
 
 def kill_port(port):
     import glob
@@ -741,54 +748,105 @@ def extract_parallel(vpath):
 
     return frames, audio_ok
 
-# ── Gemini ────────────────────────────────────────────────
+# ── OpenAI ────────────────────────────────────────────────
+def _openai_error_text(resp) -> str:
+    try:
+        data = resp.json()
+        err = data.get("error") or {}
+        msg = (err.get("message") or "").strip()
+        if msg:
+            return msg
+    except Exception:
+        pass
+    try:
+        return (resp.text or "").strip()
+    except Exception:
+        return ""
+
+
+def _openai_transcribe_audio(api_key: str, audio_path: str) -> str:
+    """Best-effort audio → text using OpenAI transcription."""
+    model = os.environ.get("SCOOPZ_OPENAI_TRANSCRIBE_MODEL", "whisper-1").strip() or "whisper-1"
+    timeout_s = float(os.environ.get("SCOOPZ_OPENAI_TIMEOUT_S", "45").strip() or "45")
+    url = OPENAI_BASE + "/audio/transcriptions"
+
+    with open(audio_path, "rb") as f:
+        files = {"file": ("audio.mp3", f, "audio/mpeg")}
+        data = {
+            "model": model,
+            "response_format": "text",
+        }
+        headers = {"Authorization": f"Bearer {api_key}"}
+        resp = requests.post(url, headers=headers, data=data, files=files, timeout=timeout_s)
+
+    if not resp.ok:
+        raise ValueError(f"OpenAI transcription error (HTTP {resp.status_code}): {_openai_error_text(resp)[:200]}")
+
+    # response_format=text returns raw text; some setups return JSON.
+    txt = (resp.text or "").strip()
+    if txt and not txt.startswith("{"):
+        return txt
+    try:
+        return (resp.json().get("text") or "").strip()
+    except Exception:
+        return txt
+
+
 def generate_caption(api_key, frame_paths, audio_ok, prompt_text: str):
-    """Single Gemini multimodal call with frames + audio."""
-    parts = []
+    """OpenAI call using frames (+ optional transcript from audio)."""
+    chat_model = os.environ.get("SCOOPZ_OPENAI_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+    timeout_s = float(os.environ.get("SCOOPZ_OPENAI_TIMEOUT_S", "45").strip() or "45")
+    do_transcribe = os.environ.get("SCOOPZ_TRANSCRIBE_AUDIO", "1").strip() not in ("0", "false", "False")
+
+    transcript = ""
+    if audio_ok and do_transcribe:
+        transcript = _openai_transcribe_audio(api_key, TEMP_AUDIO)
+
+    content = []
+    text = prompt_text
+    if transcript:
+        text += "\n\nAUDIO TRANSCRIPT (best-effort):\n" + transcript
+    content.append({"type": "text", "text": text})
 
     for fp in frame_paths:
-        parts.append({
-            "inline_data": {
-                "mime_type": "image/jpeg",
-                "data": file_b64(fp)
-            }
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": "data:image/jpeg;base64," + file_b64(fp)},
         })
-
-    if audio_ok:
-        parts.append({
-            "inline_data": {
-                "mime_type": "audio/mpeg",
-                "data": file_b64(TEMP_AUDIO)
-            }
-        })
-
-    parts.append({"text": prompt_text})
 
     payload = {
-        "contents": [{"parts": parts}],
-        "generationConfig": {
-            "temperature": 1.0,
-            "maxOutputTokens": 900
-        }
+        "model": chat_model,
+        "messages": [
+            {
+                "role": "user",
+                "content": content,
+            }
+        ],
+        "temperature": 1.0,
+        "max_tokens": 900,
     }
 
-    url     = GEMINI_BASE + "/" + GEMINI_MODEL + ":generateContent"
+    url = OPENAI_BASE + "/chat/completions"
     headers = {
-        "Content-Type":    "application/json",
-        "x-goog-api-key":  api_key,
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
     }
 
     for attempt in range(3):
-        resp = requests.post(url, headers=headers, json=payload, timeout=30)
+        resp = requests.post(url, headers=headers, json=payload, timeout=timeout_s)
         if resp.status_code == 429:
             time.sleep(10)
             continue
+        if resp.status_code == 401:
+            raise ValueError("OpenAI auth error (401). Check OPENAI_API_KEY / SCOOPZ_OPENAI_API_KEY.")
         if not resp.ok:
-            print(f"Gemini error {resp.status_code}: {resp.text[:300]}")
+            msg = _openai_error_text(resp)
+            print(f"OpenAI error {resp.status_code}: {msg[:300]}")
         resp.raise_for_status()
-        return resp.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        data = resp.json()
+        return (data["choices"][0]["message"]["content"] or "").strip()
 
-    raise ValueError("Gemini rate limit")
+    raise ValueError("OpenAI rate limit")
 
 def format_result(raw, pov_mode: str = ""):
     """Parse CAPTION + HASHTAGS and sanitize output."""
@@ -1058,7 +1116,7 @@ def format_result(raw, pov_mode: str = ""):
     def _parse_candidates(text: str) -> list[tuple[str, str]]:
         """Return list of (caption, hashtags) pairs.
 
-        Gemini sometimes varies formatting (markdown bolding, missing colons,
+        The model sometimes varies formatting (markdown bolding, missing colons,
         headers on the same line, etc.). This parser is intentionally tolerant
         so we don't fall back to copying the entire raw multi-candidate blob.
         """
@@ -1625,7 +1683,7 @@ def main():
     try:
         api_key = load_api_key()
     except FileNotFoundError:
-        notify("Error", "No API key at ~/.config/gemini_key.txt", "nb_error")
+        notify("Error", "No API key at ~/.config/openai_key.txt", "nb_error")
         sys.exit(1)
 
     try:
