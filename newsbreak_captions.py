@@ -159,6 +159,21 @@ def cleanup_temp_files(job_id: str):
         pass
 
 
+def print_batch_results(results: List[CaptionResult]):
+    """Print raw captions in terminal for direct copy/paste."""
+    print("\n" + "=" * 72)
+    print("RAW CAPTIONS")
+    print("=" * 72)
+    for i, r in enumerate(results, 1):
+        print("")
+        if r.error:
+            print(f"Error: {r.error}")
+            continue
+        print(r.caption)
+        print(r.hashtags)
+    print("\n" + "=" * 72 + "\n")
+
+
 def format_single_caption_for_clipboard(result: CaptionResult, index: int) -> str:
     if result.error:
         return f"❌ Error (Video {index}): {result.error}".strip()
@@ -873,8 +888,9 @@ def process_batch(job_id: str, video_paths: List[str], api_key: str):
             processing_jobs[job_id]["results"] = [asdict(r) for r in safe_results]
             processing_jobs[job_id]["clipboard_total"] = len(safe_results)
 
-        notify("Batch Complete", f"{len(safe_results)} captions ready to copy", "scoopz_batch")
-        toast(f"{len(safe_results)} captions ready")
+        print_batch_results(safe_results)
+        notify("Batch Complete", f"{len(safe_results)} captions printed in terminal", "scoopz_batch")
+        toast(f"{len(safe_results)} captions printed")
         
     except Exception as e:
         print(f"Batch processing error: {e}")
@@ -958,18 +974,7 @@ def build_html(videos: List[str]) -> str:
   .spinner{{width:48px;height:48px;border:4px solid #333;border-top-color:#00ff88;border-radius:50%;animation:spin 0.7s linear infinite}}
   .msg{{color:#fff;font-size:16px;font-weight:600}}
   .detail{{color:#aaa;font-size:13px}}
-  .progress{{color:#00ff88;font-size:14px;margin-top:8px}}
-    .results{{display:none;padding:12px 10px 90px}}
-    .results.show{{display:block}}
-    .results h2{{color:#fff;font-size:14px;margin:2px 4px 10px}}
-    .result-card{{background:#111;border:1px solid #262626;border-radius:8px;padding:10px;margin:0 4px 10px}}
-    .result-top{{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}}
-    .result-name{{color:#9aa0a6;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
-    .copy-btn{{background:#00ff88;color:#000;border:none;border-radius:6px;padding:7px 10px;font-size:12px;font-weight:700;cursor:pointer}}
-    .copy-btn:active{{transform:scale(0.98)}}
-    .copy-btn.done{{background:#2ecc71}}
-    .cap-text{{color:#fff;font-size:14px;line-height:1.35;white-space:pre-wrap}}
-    .tag-text{{color:#7fd5a1;font-size:13px;line-height:1.35;white-space:pre-wrap;margin-top:8px}}
+    .progress{{color:#00ff88;font-size:14px;margin-top:8px}}
   @keyframes spin{{to{{transform:rotate(360deg)}}}}
 </style>
 </head>
@@ -980,10 +985,6 @@ def build_html(videos: List[str]) -> str:
     <div class="stats">4 frames per video · ~6s per video · parallel processing</div>
 </header>
 <div class="grid">{cards}</div>
-<div class="results" id="results">
-    <h2>Captions</h2>
-    <div id="resultsList"></div>
-</div>
 <button class="fab" id="fab" onclick="processSelected()">
   <span class="counter" id="counter">0</span>
   GO
@@ -1002,9 +1003,6 @@ const overlay = document.getElementById('overlay');
 const msg = document.getElementById('msg');
 const detail = document.getElementById('detail');
 const progress = document.getElementById('progress');
-const results = document.getElementById('results');
-const resultsList = document.getElementById('resultsList');
-let latestResults = [];
 
 function toggleSelect(i) {{
   const card = document.querySelector(`[data-index="${{i}}"]`);
@@ -1027,77 +1025,9 @@ function updateFab() {{
   fab.classList.toggle('show', selected.size > 0);
 }}
 
-function escapeHtml(text) {{
-    return (text || '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;')
-        .replace(/"/g, '&quot;')
-        .replace(/'/g, '&#039;');
-}}
-
-async function copyCaption(text, btn) {{
-    try {{
-        const resp = await fetch('/copy_text', {{
-            method: 'POST',
-            headers: {{ 'Content-Type': 'application/json' }},
-            body: JSON.stringify({{ text }})
-        }});
-        const data = await resp.json();
-        if (!resp.ok || !data.success) throw new Error(data.error || 'copy failed');
-
-        btn.textContent = 'Copied';
-        btn.classList.add('done');
-        setTimeout(() => {{
-            btn.textContent = 'Copy';
-            btn.classList.remove('done');
-        }}, 900);
-    }} catch (e) {{
-        alert('Copy failed. Keep this page open in Termux browser session and try again.');
-    }}
-}}
-
-function copyCaptionAt(idx, btn) {{
-  const r = latestResults[idx];
-  if (!r) return;
-  const caption = r.error ? `Error: ${{r.error || 'Unknown error'}}` : (r.caption || '');
-  const hashtags = r.error ? '' : (r.hashtags || '');
-  const combined = hashtags ? `${{caption}}\n\n${{hashtags}}` : caption;
-  copyCaption(combined, btn);
-}}
-
-function renderResults(items) {{
-    if (!Array.isArray(items) || items.length === 0) return;
-    latestResults = items;
-    const html = items.map((r, idx) => {{
-        const caption = r.error ? `Error: ${{r.error || 'Unknown error'}}` : (r.caption || '');
-        const hashtags = r.error ? '' : (r.hashtags || '');
-        return `
-            <div class="result-card">
-                <div class="result-top">
-                    <div class="result-name">${{idx + 1}}. ${{escapeHtml(r.video_name || 'video')}}</div>
-                    <button class="copy-btn" onclick="copyCaptionAt(${{idx}}, this)">Copy</button>
-                </div>
-                <div class="cap-text">${{escapeHtml(caption)}}</div>
-                ${{hashtags ? `<div class="tag-text">${{escapeHtml(hashtags)}}</div>` : ''}}
-            </div>`;
-    }}).join('');
-
-    resultsList.innerHTML = html;
-    results.classList.add('show');
-    window.scrollTo({{ top: document.body.scrollHeight, behavior: 'smooth' }});
-}}
-
-function clearResults() {{
-    latestResults = [];
-    resultsList.innerHTML = '';
-    results.classList.remove('show');
-}}
-
 async function processSelected() {{
   if (selected.size === 0) return;
   const indices = Array.from(selected).sort((a,b) => a - b);
-    clearResults();
   overlay.classList.add('show');
   msg.textContent = 'Starting...';
   detail.textContent = `Processing ${{indices.length}} videos`;
@@ -1125,10 +1055,9 @@ async function processSelected() {{
         progress.textContent = `${{status.completed}}/${{status.total}}`;
       }} else if (status.status === 'done') {{
         msg.textContent = 'Done!';
-                const total = (status.clipboard_total ?? 0);
-                detail.textContent = total > 0 ? `${{total}} captions ready. Tap Copy on each one.` : 'No captions generated';
+        const total = (status.clipboard_total ?? 0);
+        detail.textContent = total > 0 ? `${{total}} captions printed in terminal.` : 'No captions generated';
         progress.textContent = '';
-                renderResults(status.results || []);
         setTimeout(() => {{
           overlay.classList.remove('show');
           selected.clear();
@@ -1229,27 +1158,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(json.dumps({"job_id": job_id}).encode())
-            elif self.path == "/copy_text":
-                content_length = int(self.headers.get('Content-Length', '0'))
-                body = self.rfile.read(content_length) if content_length > 0 else b"{}"
-                data = json.loads(body)
-                text = data.get("text", "") if isinstance(data, dict) else ""
-
-                if not text:
-                    self.send_response(400)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    self.wfile.write(json.dumps({"success": False, "error": "Missing text"}).encode())
-                    return
-
-                ok = copy_to_clipboard(text)
-                self.send_response(200 if ok else 500)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({
-                    "success": bool(ok),
-                    "error": None if ok else "Clipboard copy failed"
-                }).encode())
             else:
                 self.send_response(404)
                 self.end_headers()

@@ -65,6 +65,47 @@ class ScoopzHybrid:
         self.history.add(video_id)
         with open(HISTORY_FILE, "a") as f:
             f.write(f"{video_id}\n")
+
+    def _safe_slug(self, text: str, max_len: int = 48) -> str:
+        text = (text or "").strip().lower()
+        text = re.sub(r"\s+", "_", text)
+        text = re.sub(r"[^a-z0-9_\-]", "", text)
+        text = re.sub(r"_+", "_", text).strip("_")
+        return text[:max_len]
+
+    def _build_video_basename(self, clip: dict, video_id: str) -> str:
+        """Create readable but stable filename with id suffix for uniqueness."""
+        author = ""
+        raw_author = clip.get("author")
+        if isinstance(raw_author, dict):
+            author = (
+                raw_author.get("unique_id")
+                or raw_author.get("nickname")
+                or raw_author.get("id")
+                or ""
+            )
+        elif isinstance(raw_author, str):
+            author = raw_author
+
+        title = (
+            clip.get("title")
+            or clip.get("desc")
+            or clip.get("region")
+            or ""
+        )
+
+        author_slug = self._safe_slug(author, max_len=20)
+        title_slug = self._safe_slug(title, max_len=40)
+        id_suffix = self._safe_slug(video_id, max_len=24) or "vid"
+
+        parts = []
+        if author_slug:
+            parts.append(author_slug)
+        if title_slug:
+            parts.append(title_slug)
+        parts.append(id_suffix)
+
+        return "__".join(parts)
     
     async def watch_inbox(self):
         while True:
@@ -271,7 +312,8 @@ class ScoopzHybrid:
                     self.failed += 1 # Likely an image carousel, not a video
                     continue
                 
-                final_path = EXPORT_DIR / f"{video_id}.mp4"
+                file_base = self._build_video_basename(clip, video_id)
+                final_path = EXPORT_DIR / f"{file_base}.mp4"
                 
                 # Offload the heavy file downloading to a background thread
                 success = await asyncio.to_thread(self._sync_download, play_url, final_path)
