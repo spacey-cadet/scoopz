@@ -4,21 +4,12 @@ This guide reflects the current scripts in this project:
 - collector.py
 - newsbreak_captions.py
 - scoopz_env.sh
-- newsbreak_captions.sh (legacy helper)
-
-## What Changed
-
-The workflow is now split into two independent stages:
-1. Collect TikTok videos into the Scoopz folder.
-2. Pick any saved video and generate a NewsBreak-ready caption with Gemini.
-
-The old upload pipeline referenced in scoopz_env.sh (for example uploader.py, downloads/, data/queue.json) is not present in this repository anymore.
 
 ## Runtime Overview
 
-- collector.py watches a link inbox file and auto-downloads TikTok videos.
-- newsbreak_captions.py launches a local web picker with thumbnails, then generates caption + hashtags and copies output to clipboard.
-- Both scripts are designed for Termux on Android paths (/sdcard/..., termux-* commands).
+- collector.py watches a link inbox file and downloads TikTok videos to /sdcard/Pictures/scoopz.
+- newsbreak_captions.py opens a local thumbnail picker, lets you select up to 8 videos, and generates captions in parallel.
+- After generation completes, captions are auto-copied to clipboard one-by-one (with delay) to populate Gboard clipboard history.
 
 ## Prerequisites (Termux)
 
@@ -37,61 +28,16 @@ Give Termux storage permission (required for /sdcard access):
 termux-setup-storage
 ```
 
-## Optional: Local Transcription (Recommended)
-
-If you want captions to adapt when there *is* speech, enable local transcription and feed the transcript into Gemini.
-
-The caption script supports two options:
-
-### Option A (Recommended): `whisper.cpp` CLI
-
-This is usually the fastest + most stable on Termux.
-
-Set these environment variables before running [newsbreak_captions.py](newsbreak_captions.py):
-
-- `SCOOPZ_TRANSCRIBE=1`
-- `SCOOPZ_WHISPER_CPP_BIN` (path or command name for the whisper.cpp binary)
-- `SCOOPZ_WHISPER_CPP_MODEL` (path to your model file)
-- `SCOOPZ_WHISPER_LANG=en` (optional)
-
-Example:
-
-```bash
-export SCOOPZ_TRANSCRIBE=1
-export SCOOPZ_WHISPER_CPP_BIN=~/whisper.cpp/main
-export SCOOPZ_WHISPER_CPP_MODEL=~/whisper.cpp/models/ggml-tiny.en.bin
-export SCOOPZ_WHISPER_LANG=en
-```
-
-### Option B: OpenAI Whisper CLI (`whisper`)
-
-This works if you already have it installed, but it can be slower on phones.
-
-```bash
-pip install -U openai-whisper
-export SCOOPZ_TRANSCRIBE=1
-export SCOOPZ_WHISPER_MODEL=tiny
-export SCOOPZ_WHISPER_LANG=en
-```
-
-## Gemini Audio Upload Toggle
-
-By default, [newsbreak_captions.py](newsbreak_captions.py) does **not** upload audio to Gemini (it prefers local transcription).
-
-If you want to upload audio anyway, set:
-
-```bash
-export SCOOPZ_GEMINI_SEND_AUDIO=1
-```
-
 ## Required Folders and Files
 
-The code expects these locations:
+The current code expects:
 
 - Video output folder: /sdcard/Pictures/scoopz
+- Thumbnail cache: /sdcard/Pictures/scoopz/.thumbs
+- Temp extraction folder: /sdcard/Download/scoopz_temp
 - URL inbox file: /sdcard/Download/links_inbox.txt
 - Download history file: /sdcard/Download/scoopz_history.log
-- Gemini key file: ~/.config/gemini_key.txt
+- OpenAI key file: ~/.config/openai_key.txt
 
 Create missing files/folders:
 
@@ -103,34 +49,26 @@ mkdir -p ~/.config
 : > /sdcard/Download/scoopz_history.log
 ```
 
-Add your Gemini API key:
+Add OpenAI API key:
 
 ```bash
-echo "YOUR_GEMINI_API_KEY" > ~/.config/gemini_key.txt
-chmod 600 ~/.config/gemini_key.txt
+echo "YOUR_OPENAI_API_KEY" > ~/.config/openai_key.txt
+chmod 600 ~/.config/openai_key.txt
 ```
 
 ## Daily Workflow
 
 ### Step 1: Start collector
 
-From project folder:
-
 ```bash
 python collector.py
 ```
 
 What happens:
-- The script polls /sdcard/Download/links_inbox.txt every 0.5s.
-- Any TikTok URL found is queued.
-- Up to 5 downloads run in parallel.
-- Files are saved as /sdcard/Pictures/scoopz/<video_id>.mp4.
-- Duplicate video IDs are skipped using /sdcard/Download/scoopz_history.log.
-- Termux notifications confirm active status and completed downloads.
-
-How to feed links:
-- Put TikTok links into /sdcard/Download/links_inbox.txt (one per line).
-- Once read, the inbox is cleared automatically.
+- Polls /sdcard/Download/links_inbox.txt.
+- Queues valid TikTok URLs.
+- Downloads videos into /sdcard/Pictures/scoopz.
+- Skips duplicates using /sdcard/Download/scoopz_history.log.
 
 ### Step 2: Generate captions
 
@@ -142,88 +80,34 @@ python newsbreak_captions.py
 
 What happens:
 - Script scans /sdcard/Pictures/scoopz for mp4 files.
-- It generates thumbnail previews in /sdcard/Pictures/scoopz/.thumbs.
-- It starts local server on 127.0.0.1:8765.
-- A persistent notification opens the picker page.
-- Tap a video card to process that video.
-- The selected video is compressed, uploaded to Gemini, analyzed, then deleted from Gemini.
-- Output is returned as:
-  - caption
-  - hashtags
-- Final text is clipped to max 150 characters and copied to clipboard.
+- Generates thumbnails in /sdcard/Pictures/scoopz/.thumbs.
+- Starts local picker on 127.0.0.1:8765.
+- You select 1 to 8 videos and tap GO.
+- For each selected video, ffmpeg extracts 4 frames and an audio clip.
+- Captions are generated in parallel using OpenAI.
+- When done, it auto-copies captions sequentially to clipboard history (Gboard-friendly) with a default delay of 2.0s between copies.
 
-## How the Code Works
+Important note:
+- Android has one active clipboard slot.
+- Multi-caption retrieval depends on keyboard clipboard history (Gboard clipboard memory).
 
-## collector.py
+## Current Defaults in newsbreak_captions.py
 
-Main responsibilities:
-- Inbox watcher:
-  - watch_inbox() reads links_inbox.txt, extracts TikTok URLs, pushes to async queue.
-- Download workers:
-  - download_worker() calls TikWM API with retry logic.
-  - Downloads clip["play"] stream to mp4.
-- History dedupe:
-  - add_to_history() persists video IDs to scoopz_history.log.
-- Notifications:
-  - send_notification() posts low-priority Termux notifications.
-- Runtime:
-  - run() starts watcher + N workers and keeps process alive.
-
-Important settings at top:
-- MAX_WORKERS = 5
-- POLL_RATE = 0.5
-- TIKWM_API = https://www.tikwm.com/api/
-
-## newsbreak_captions.py
-
-Main responsibilities:
-- UI and video selection:
-  - build_html() renders mobile grid UI.
-  - Handler.do_GET() handles /, /pick, /status.
-- Thumbnail pipeline:
-  - generate_thumbnails() uses ffmpeg to create first-frame jpg.
-- Gemini pipeline:
-  - compress_video() reduces upload size.
-  - upload_video() uploads via resumable API.
-  - wait_for_processing() waits for ACTIVE state.
-  - generate_caption() sends prompt and retries on 429 limits.
-  - format_result() enforces 150-char combined output.
-  - delete_file() removes uploaded Gemini file.
-- Clipboard and UX:
-  - copy_to_clipboard() stores final result.
-  - notify() and toast() provide status updates.
-
-Important settings at top:
-- MODEL = gemini-2.5-flash
-- SCOOPZ_DIR = /sdcard/Pictures/scoopz
-- TEMP_COMPRESSED = /sdcard/Download/nb_caption_compressed.mp4
+- MAX_BATCH_SIZE = 8
+- NUM_FRAMES = 4
+- EXTRACTION_WORKERS = 3
+- API_WORKERS = 3
 - PORT = 8765
+- CLIPBOARD_AUTO_CYCLE = True
+- CLIPBOARD_CYCLE_DELAY_SEC = 2.0
 
-## Helper scripts
+## Port Handling (8765)
 
-## scoopz_env.sh
+Server startup is hardened:
+- It tries to bind normally first.
+- If port 8765 is in use, it attempts to free the listener process (best-effort using lsof/ss/netstat/fuser), then retries bind.
 
-Contains shell helpers and aliases, but parts of it still reference files not present in this repo:
-- uploader.py
-- downloads/
-- data/uploaded.json
-- data/queue.json
-
-You can still use it for custom command wrappers, but treat upload/status sections as legacy until updated to the current collector + caption workflow.
-
-## newsbreak_captions.sh
-
-This helper currently calls:
-
-```bash
-python newsbreak_caption.py "$1"
-```
-
-That filename does not exist in this repository (current script is newsbreak_captions.py), so this helper should be treated as legacy or corrected before use.
-
-## Recommended Command Set (Current)
-
-Use these as your active workflow commands:
+## Recommended Command Set
 
 ```bash
 # terminal 1
@@ -233,19 +117,27 @@ python collector.py
 python newsbreak_captions.py
 ```
 
+## Recommended Gboard Settings
+
+Use these settings so the 8 auto-copied captions are retained in Gboard history:
+
+1. Open any text field, tap the Gboard clipboard icon, and make sure Clipboard is turned on.
+2. In Gboard settings, allow clipboard suggestions/history (wording may vary by Android version).
+3. If your phone aggressively kills background apps, exclude Gboard from battery optimization.
+4. If some entries are missed, increase CLIPBOARD_CYCLE_DELAY_SEC in newsbreak_captions.py to 2.5 or 3.0.
+5. For captions you want to keep long-term, pin them in Gboard clipboard after generation.
+
 ## Troubleshooting
 
 - No videos appear in picker:
-  - Verify files exist in /sdcard/Pictures/scoopz and end with .mp4.
-- Collector does not download:
-  - Confirm links are valid TikTok URLs.
-  - Confirm links are being written to /sdcard/Download/links_inbox.txt.
+  - Verify .mp4 files exist in /sdcard/Pictures/scoopz.
 - Caption script exits with key error:
-  - Check ~/.config/gemini_key.txt exists and is non-empty.
-- Port conflict on 8765:
-  - Script already tries to kill previous listener; restart script if needed.
-- Clipboard not updating:
-  - Ensure Termux:API app is installed and termux-api package is installed in Termux.
+  - Confirm ~/.config/openai_key.txt exists and is not empty.
+- Clipboard history missing some entries:
+  - Ensure Gboard clipboard is enabled.
+  - Increase CLIPBOARD_CYCLE_DELAY_SEC (for example 2.5 or 3.0).
+- Clipboard not updating at all:
+  - Ensure Termux:API app is installed and termux-api package exists in Termux.
 
 ## Minimal End-to-End Test
 
@@ -253,5 +145,5 @@ python newsbreak_captions.py
 2. Add one TikTok URL to /sdcard/Download/links_inbox.txt.
 3. Confirm an mp4 appears in /sdcard/Pictures/scoopz.
 4. Start newsbreak_captions.py.
-5. Open picker from notification, tap video, wait for "Caption Ready".
-6. Paste clipboard output into Notes to confirm result format.
+5. Pick up to 8 videos and tap GO.
+6. Open Gboard clipboard and confirm copied captions are present in history.
