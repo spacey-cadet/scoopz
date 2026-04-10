@@ -8,7 +8,7 @@ This guide reflects the current scripts in this project:
 ## Runtime Overview
 
 - collector.py watches a link inbox file and downloads TikTok videos to /sdcard/Pictures/scoopz.
-- newsbreak_captions.py opens a local thumbnail picker, lets you select up to 10 videos, and generates captions in parallel.
+- newsbreak_captions.py opens a local thumbnail picker, lets you select up to 3 videos, and generates captions in parallel.
 - After generation completes, all captions appear in a results panel with per-caption Copy buttons.
 
 ## Prerequisites (Termux)
@@ -82,7 +82,7 @@ What happens:
 - Script scans /sdcard/Pictures/scoopz for mp4 files.
 - Generates thumbnails in /sdcard/Pictures/scoopz/.thumbs.
 - Starts local picker on 127.0.0.1:8765.
-- You select 1 to 10 videos and tap GO.
+- You select 1 to 3 videos and tap GO.
 - For each selected video, ffmpeg extracts 4 frames.
 - Captions are generated in parallel using OpenAI.
 - When done, captions are shown in-page; tap Copy on the caption you want while posting.
@@ -92,7 +92,7 @@ Important note:
 
 ## Current Defaults in newsbreak_captions.py
 
-- MAX_BATCH_SIZE = 10
+- MAX_BATCH_SIZE = 3
 - NUM_FRAMES = 4
 - EXTRACTION_WORKERS = 3
 - API_WORKERS = 3
@@ -132,5 +132,5 @@ python newsbreak_captions.py
 2. Add one TikTok URL to /sdcard/Download/links_inbox.txt.
 3. Confirm an mp4 appears in /sdcard/Pictures/scoopz.
 4. Start newsbreak_captions.py.
-5. Pick up to 10 videos and tap GO.
+5. Pick up to 3 videos and tap GO.
 6. Confirm the results panel appears and each caption can be copied with its Copy button.
