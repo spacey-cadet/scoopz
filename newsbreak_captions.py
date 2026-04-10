@@ -1038,30 +1038,22 @@ function escapeHtml(text) {{
 
 async function copyCaption(text, btn) {{
     try {{
-        if (navigator.clipboard && window.isSecureContext) {{
-            await navigator.clipboard.writeText(text);
-        }} else {{
-            // Fallback for browsers/webviews with restricted clipboard API.
-            const ta = document.createElement('textarea');
-            ta.value = text;
-            ta.style.position = 'fixed';
-            ta.style.left = '-9999px';
-            document.body.appendChild(ta);
-            ta.focus();
-            ta.select();
-            const ok = document.execCommand('copy');
-            document.body.removeChild(ta);
-            if (!ok) throw new Error('execCommand copy failed');
-        }}
+        const resp = await fetch('/copy_text', {{
+            method: 'POST',
+            headers: {{ 'Content-Type': 'application/json' }},
+            body: JSON.stringify({{ text }})
+        }});
+        const data = await resp.json();
+        if (!resp.ok || !data.success) throw new Error(data.error || 'copy failed');
 
         btn.textContent = 'Copied';
         btn.classList.add('done');
         setTimeout(() => {{
             btn.textContent = 'Copy';
             btn.classList.remove('done');
-        }}, 1200);
+        }}, 900);
     }} catch (e) {{
-        alert('Copy failed on this browser/tab. Try Chrome and tap again.');
+        alert('Copy failed. Keep this page open in Termux browser session and try again.');
     }}
 }}
 
@@ -1237,6 +1229,27 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
                 self.wfile.write(json.dumps({"job_id": job_id}).encode())
+            elif self.path == "/copy_text":
+                content_length = int(self.headers.get('Content-Length', '0'))
+                body = self.rfile.read(content_length) if content_length > 0 else b"{}"
+                data = json.loads(body)
+                text = data.get("text", "") if isinstance(data, dict) else ""
+
+                if not text:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "application/json")
+                    self.end_headers()
+                    self.wfile.write(json.dumps({"success": False, "error": "Missing text"}).encode())
+                    return
+
+                ok = copy_to_clipboard(text)
+                self.send_response(200 if ok else 500)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "success": bool(ok),
+                    "error": None if ok else "Clipboard copy failed"
+                }).encode())
             else:
                 self.send_response(404)
                 self.end_headers()
