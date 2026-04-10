@@ -38,7 +38,7 @@ CLIPBOARD_CYCLE_DELAY_SEC = 3.0
 CLIPBOARD_COPY_RETRIES = 3
 CLIPBOARD_RETRY_DELAY_SEC = 0.8
 
-MAX_BATCH_SIZE  = 5
+MAX_BATCH_SIZE  = 10
 EXTRACTION_WORKERS = 3  # Parallel ffmpeg extractions
 API_WORKERS        = 3  # Parallel OpenAI API calls (safe for GPT-4o rate limits)
 NUM_FRAMES         = 4  # Extract 4 frames per video
@@ -478,7 +478,7 @@ STYLE MODE: {style_mode}
 CONTEXT: You're seeing {num_frames} frames across the video (beginning, early-mid, late-mid, end). Use the progression to identify tension, shifts, or reveals.
 
 REQUIREMENTS:
-- 165-210 characters total
+- no more than 175 characters total
 - 2 sentences exactly
 - 2-3 emojis total (distributed naturally)
 - Sentence 1 must hook instantly (conflict, accusation, shock, stakes, or challenge)
@@ -1004,6 +1004,7 @@ const detail = document.getElementById('detail');
 const progress = document.getElementById('progress');
 const results = document.getElementById('results');
 const resultsList = document.getElementById('resultsList');
+let latestResults = [];
 
 function toggleSelect(i) {{
   const card = document.querySelector(`[data-index="${{i}}"]`);
@@ -1037,7 +1038,22 @@ function escapeHtml(text) {{
 
 async function copyCaption(text, btn) {{
     try {{
-        await navigator.clipboard.writeText(text);
+        if (navigator.clipboard && window.isSecureContext) {{
+            await navigator.clipboard.writeText(text);
+        }} else {{
+            // Fallback for browsers/webviews with restricted clipboard API.
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.focus();
+            ta.select();
+            const ok = document.execCommand('copy');
+            document.body.removeChild(ta);
+            if (!ok) throw new Error('execCommand copy failed');
+        }}
+
         btn.textContent = 'Copied';
         btn.classList.add('done');
         setTimeout(() => {{
@@ -1045,22 +1061,30 @@ async function copyCaption(text, btn) {{
             btn.classList.remove('done');
         }}, 1200);
     }} catch (e) {{
-        alert('Copy failed on this browser.');
+        alert('Copy failed on this browser/tab. Try Chrome and tap again.');
     }}
+}}
+
+function copyCaptionAt(idx, btn) {{
+  const r = latestResults[idx];
+  if (!r) return;
+  const caption = r.error ? `Error: ${{r.error || 'Unknown error'}}` : (r.caption || '');
+  const hashtags = r.error ? '' : (r.hashtags || '');
+  const combined = hashtags ? `${{caption}}\n\n${{hashtags}}` : caption;
+  copyCaption(combined, btn);
 }}
 
 function renderResults(items) {{
     if (!Array.isArray(items) || items.length === 0) return;
+    latestResults = items;
     const html = items.map((r, idx) => {{
         const caption = r.error ? `Error: ${{r.error || 'Unknown error'}}` : (r.caption || '');
         const hashtags = r.error ? '' : (r.hashtags || '');
-        const combined = hashtags ? `${{caption}}\n\n${{hashtags}}` : caption;
-        const payload = JSON.stringify(combined);
         return `
             <div class="result-card">
                 <div class="result-top">
                     <div class="result-name">${{idx + 1}}. ${{escapeHtml(r.video_name || 'video')}}</div>
-                    <button class="copy-btn" onclick='copyCaption(${{payload}}, this)'>Copy</button>
+                    <button class="copy-btn" onclick="copyCaptionAt(${{idx}}, this)">Copy</button>
                 </div>
                 <div class="cap-text">${{escapeHtml(caption)}}</div>
                 ${{hashtags ? `<div class="tag-text">${{escapeHtml(hashtags)}}</div>` : ''}}
@@ -1072,9 +1096,16 @@ function renderResults(items) {{
     window.scrollTo({{ top: document.body.scrollHeight, behavior: 'smooth' }});
 }}
 
+function clearResults() {{
+    latestResults = [];
+    resultsList.innerHTML = '';
+    results.classList.remove('show');
+}}
+
 async function processSelected() {{
   if (selected.size === 0) return;
   const indices = Array.from(selected).sort((a,b) => a - b);
+    clearResults();
   overlay.classList.add('show');
   msg.textContent = 'Starting...';
   detail.textContent = `Processing ${{indices.length}} videos`;
