@@ -30,6 +30,10 @@ MIN_BYTES = int(os.environ.get("SCOOPZ_MIN_BYTES", "250000"))
 # Download retries (per video). Lower = faster, higher = more resilient.
 DOWNLOAD_RETRIES = int(os.environ.get("SCOOPZ_DOWNLOAD_RETRIES", "2"))
 
+# Extra safety: reject videos that cannot yield a thumbnail frame.
+# Set SCOOPZ_VALIDATE_THUMBNAIL=0 to disable this check.
+VALIDATE_THUMBNAIL = os.environ.get("SCOOPZ_VALIDATE_THUMBNAIL", "1") != "0"
+
 class ScoopzHybrid:
     def __init__(self):
         self.queue = asyncio.Queue()
@@ -82,6 +86,42 @@ class ScoopzHybrid:
         """Runs blocking requests operations safely in a thread"""
         temp_path = final_path.with_suffix('.mp4.part')
 
+        def _can_extract_thumbnail(path: Path) -> bool:
+            # Mirror picker behavior: if none of these seeks work,
+            # this file will likely show as no-thumb in the web picker.
+            seek_points = ["0.1", "0.5", "1", "2"]
+            for seek in seek_points:
+                try:
+                    r = subprocess.run(
+                        [
+                            "ffmpeg",
+                            "-nostdin",
+                            "-v",
+                            "error",
+                            "-ss",
+                            seek,
+                            "-i",
+                            str(path),
+                            "-vframes",
+                            "1",
+                            "-f",
+                            "null",
+                            "-",
+                        ],
+                        capture_output=True,
+                        text=True,
+                        timeout=12,
+                        check=False,
+                    )
+                    if r.returncode == 0:
+                        return True
+                except FileNotFoundError:
+                    # If ffmpeg is missing, do not block the download here.
+                    return True
+                except Exception:
+                    pass
+            return False
+
         def _looks_valid_mp4(path: Path) -> bool:
             try:
                 if not path.exists():
@@ -119,6 +159,9 @@ class ScoopzHybrid:
                 # ffprobe not installed; best-effort fallback already checked size.
                 pass
             except Exception:
+                return False
+
+            if VALIDATE_THUMBNAIL and not _can_extract_thumbnail(path):
                 return False
 
             # Align with Scoopz usage: ffmpeg must be able to decode at least one frame.

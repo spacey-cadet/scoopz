@@ -37,12 +37,13 @@ CLIPBOARD_CYCLE_DELAY_SEC = 3.0
 CLIPBOARD_COPY_RETRIES = 3
 CLIPBOARD_RETRY_DELAY_SEC = 0.8
 
-MAX_BATCH_SIZE  = 8
+MAX_BATCH_SIZE  = 5
 EXTRACTION_WORKERS = 3  # Parallel ffmpeg extractions
 API_WORKERS        = 3  # Parallel OpenAI API calls (safe for GPT-4o rate limits)
 NUM_FRAMES         = 4  # Extract 4 frames per video
 PORT               = 8765
 EXTRACT_AUDIO      = False  # Audio is not sent to caption generation in current flow.
+REQUIRE_VALID_THUMBNAIL = True  # Hide videos that cannot produce a thumbnail.
 
 POV_STATE_FILE = os.path.expanduser("~/.cache/scoopz_pov.json")
 
@@ -278,7 +279,23 @@ def load_videos() -> List[str]:
         ]
         existing = [f for f in files if os.path.exists(f)]
         existing.sort(key=lambda x: os.path.getmtime(x), reverse=True)
-        return existing
+
+        if not REQUIRE_VALID_THUMBNAIL:
+            return existing
+
+        filtered = []
+        skipped = 0
+        for video_path in existing:
+            thumb = generate_thumbnail(video_path)
+            if thumb:
+                filtered.append(video_path)
+            else:
+                skipped += 1
+
+        if skipped:
+            print(f"⚠ Skipped {skipped} videos with no valid thumbnail")
+
+        return filtered
     except:
         return []
 
@@ -303,21 +320,24 @@ def generate_thumbnail(video_path: str) -> Optional[str]:
     if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 500:
         return thumb_path
     
-    try:
-        subprocess.run([
-            "ffmpeg", "-nostdin", "-y",
-            "-ss", "1",
-            "-i", video_path,
-            "-vframes", "1",
-            "-q:v", "3",
-            "-vf", "scale=320:-1",
-            thumb_path
-        ], capture_output=True, timeout=15, check=True)
-        
-        if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 500:
-            return thumb_path
-    except:
-        pass
+    # Try multiple seek points because some files fail at exactly 1s.
+    seek_points = ["0.1", "0.5", "1", "2"]
+    for seek in seek_points:
+        try:
+            subprocess.run([
+                "ffmpeg", "-nostdin", "-y",
+                "-ss", seek,
+                "-i", video_path,
+                "-vframes", "1",
+                "-q:v", "3",
+                "-vf", "scale=320:-1",
+                thumb_path
+            ], capture_output=True, timeout=20, check=True)
+
+            if os.path.exists(thumb_path) and os.path.getsize(thumb_path) > 500:
+                return thumb_path
+        except:
+            pass
     
     return None
 
@@ -446,20 +466,26 @@ REQUIREMENTS:
 - 170-200 characters total
 - 2 sentences exactly
 - 2-3 emojis total (distributed naturally)
-- Start with specific visual detail from the frames
-- Build tension or curiosity using the progression you see
-- End with strong pull (question/judgment/challenge)
+- Sentence 1 must hook instantly (conflict, accusation, shock, stakes, or challenge)
+- Sentence 2 must escalate tension and force a reaction (question, judgment, or dare)
+- Do NOT narrate calmly or describe scenery like a recap
+- Do NOT mention frames/shots/timeline progression explicitly
 
 STYLE:
 - Raw, human, slightly uncomfortable
 - Not formal, not news-like
 - Avoid generic phrasing ("this guy", "some dude")
-- Use the frame progression to create narrative tension
+- Use concrete high-stakes language, not neutral observation
 
-EXAMPLES OF GOOD PROGRESSION USE:
-- "Starts calm, ends with everyone's face saying something went wrong 😬"
-- "That smile in frame 1 is completely gone by frame 4 💀"
-- "Watch how the room changes between these shots 👀"
+AVOID THESE PHRASES:
+- "by frame 4", "in frame 1", "frame 2", "this shot"
+- "starts calm, ends...", "by the end", "in this clip"
+- soft scenic lead-ins like "morning mist..." unless tied to immediate tension
+
+EXAMPLES OF GOOD HOOK STYLE:
+- "He walked in smiling like nothing happened, but every face in that room says he lied 😬 You trusting that story or calling it out?"
+- "She holds eye contact like she already knows the truth 💀 If you were in that room, would you stay quiet?"
+- "Nobody says a word, but the tension is loud enough to start a fight 👀 You backing this or exposing it?"
 
 HASHTAGS:
 - 4-5 lowercase tags
@@ -572,6 +598,11 @@ def generate_caption_openai(api_key: str,
             
             # Remove any frame labels that leaked into caption
             caption = re.sub(r'\[(Beginning|Early-mid|Late-mid|End|Frame \d+)\]\s*', '', caption, flags=re.IGNORECASE)
+            # Remove explicit frame/shot chronology references if model leaks them.
+            caption = re.sub(r'\b(in|by)\s+(frame|shot)\s*\d+\b', '', caption, flags=re.IGNORECASE)
+            caption = re.sub(r'\b(frame|shot)\s*\d+\b', '', caption, flags=re.IGNORECASE)
+            caption = re.sub(r'\b(by the end|starts calm, ends|in this clip)\b', '', caption, flags=re.IGNORECASE)
+            caption = re.sub(r'\s{2,}', ' ', caption).strip(' ,.-')
             
             return {
                 "caption": caption,
@@ -806,17 +837,18 @@ def build_html(videos: List[str]) -> str:
     for i, vpath in enumerate(videos):
         try:
             b64 = get_thumb_b64(vpath)
-            src = f"data:image/jpeg;base64,{b64}" if b64 else ""
+            if not b64:
+                # Should be rare because load_videos pre-filters, but skip defensively.
+                continue
+
+            src = f"data:image/jpeg;base64,{b64}"
             size_mb = os.path.getsize(vpath) / (1024 * 1024)
             name = os.path.basename(vpath)
-            
-            img = (f"<img src='{src}' loading='lazy'>" if src 
-                   else f"<div class='no-thumb'>{name[:20]}</div>")
             
             cards += f"""
             <div class="card" data-index="{i}" onclick="toggleSelect({i})">
                 <div class="check" id="check-{i}">✓</div>
-                {img}
+                <img src='{src}' loading='lazy'>
                 <div class="label">{size_mb:.1f}MB</div>
             </div>"""
         except:

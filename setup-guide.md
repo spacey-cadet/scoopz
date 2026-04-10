@@ -8,7 +8,7 @@ This guide reflects the current scripts in this project:
 ## Runtime Overview
 
 - collector.py watches a link inbox file and downloads TikTok videos to /sdcard/Pictures/scoopz.
-- newsbreak_captions.py opens a local thumbnail picker, lets you select up to 8 videos, and generates captions in parallel.
+- newsbreak_captions.py opens a local thumbnail picker, lets you select up to 5 videos, and generates captions in parallel.
 - After generation completes, captions are auto-copied to clipboard one-by-one (with delay) to populate Gboard clipboard history.
 
 ## Prerequisites (Termux)
@@ -82,10 +82,10 @@ What happens:
 - Script scans /sdcard/Pictures/scoopz for mp4 files.
 - Generates thumbnails in /sdcard/Pictures/scoopz/.thumbs.
 - Starts local picker on 127.0.0.1:8765.
-- You select 1 to 8 videos and tap GO.
-- For each selected video, ffmpeg extracts 4 frames and an audio clip.
+- You select 1 to 5 videos and tap GO.
+- For each selected video, ffmpeg extracts 4 frames.
 - Captions are generated in parallel using OpenAI.
-- When done, it auto-copies captions sequentially to clipboard history (Gboard-friendly) with a default delay of 2.0s between copies.
+- When done, it auto-copies captions sequentially to clipboard history (Gboard-friendly) with a default delay of 3.0s between copies.
 
 Important note:
 - Android has one active clipboard slot.
@@ -93,13 +93,13 @@ Important note:
 
 ## Current Defaults in newsbreak_captions.py
 
-- MAX_BATCH_SIZE = 8
+- MAX_BATCH_SIZE = 5
 - NUM_FRAMES = 4
 - EXTRACTION_WORKERS = 3
 - API_WORKERS = 3
 - PORT = 8765
 - CLIPBOARD_AUTO_CYCLE = True
-- CLIPBOARD_CYCLE_DELAY_SEC = 2.0
+- CLIPBOARD_CYCLE_DELAY_SEC = 3.0
 
 ## Port Handling (8765)
 
@@ -119,7 +119,7 @@ python newsbreak_captions.py
 
 ## Recommended Gboard Settings
 
-Use these settings so the 8 auto-copied captions are retained in Gboard history:
+Use these settings so all auto-copied captions are retained in Gboard history:
 
 1. Open any text field, tap the Gboard clipboard icon, and make sure Clipboard is turned on.
 2. In Gboard settings, allow clipboard suggestions/history (wording may vary by Android version).
@@ -145,5 +145,5 @@ Use these settings so the 8 auto-copied captions are retained in Gboard history:
 2. Add one TikTok URL to /sdcard/Download/links_inbox.txt.
 3. Confirm an mp4 appears in /sdcard/Pictures/scoopz.
 4. Start newsbreak_captions.py.
-5. Pick up to 8 videos and tap GO.
+5. Pick up to 5 videos and tap GO.
 6. Open Gboard clipboard and confirm copied captions are present in history.
