@@ -24,6 +24,7 @@ OPENAI_KEY_FILE = os.path.expanduser("~/.config/openai_key.txt")
 OPENAI_MODEL    = "gpt-4o"
 OPENAI_BASE     = "https://api.openai.com/v1/chat/completions"
 OPENAI_MODELS_BASE = "https://api.openai.com/v1/models"
+OPENAI_TRANSCRIBE_BASE = "https://api.openai.com/v1/audio/transcriptions"
 
 SCOOPZ_DIR      = "/sdcard/Pictures/scoopz"
 THUMB_DIR       = "/sdcard/Pictures/scoopz/.thumbs"
@@ -42,8 +43,13 @@ EXTRACTION_WORKERS = 3  # Parallel ffmpeg extractions
 API_WORKERS        = 3  # Parallel OpenAI API calls (safe for GPT-4o rate limits)
 NUM_FRAMES         = 4  # Extract 4 frames per video
 PORT               = 8765
-EXTRACT_AUDIO      = False  # Audio is not sent to caption generation in current flow.
+EXTRACT_AUDIO      = True
 REQUIRE_VALID_THUMBNAIL = True  # Hide videos that cannot produce a thumbnail.
+
+# Weighting: by default, prioritize spoken audio over visuals.
+AUDIO_WEIGHT = float(os.environ.get("SCOOPZ_AUDIO_WEIGHT", "0.65"))
+FRAME_WEIGHT = float(os.environ.get("SCOOPZ_FRAME_WEIGHT", "0.35"))
+TRANSCRIBE_AUDIO = os.environ.get("SCOOPZ_TRANSCRIBE_AUDIO", "1") != "0"
 
 POV_STATE_FILE = os.path.expanduser("~/.cache/scoopz_pov.json")
 
@@ -460,10 +466,18 @@ CAPTION_PROMPT = """Write a punchy, scroll-stopping caption based on these {num_
 
 POV: {pov_mode}
 
+SIGNAL WEIGHTS:
+- Audio/transcript weight: {audio_weight}
+- Visual frames weight: {frame_weight}
+- Default behavior: prioritize spoken words, claims, arguments, admissions, and key quotes from transcript.
+- If transcript appears to be mostly music/noise/empty/unclear, ignore audio weight and prioritize visuals.
+
+STYLE MODE: {style_mode}
+
 CONTEXT: You're seeing {num_frames} frames across the video (beginning, early-mid, late-mid, end). Use the progression to identify tension, shifts, or reveals.
 
 REQUIREMENTS:
-- 170-200 characters total
+- 165-210 characters total
 - 2 sentences exactly
 - 2-3 emojis total (distributed naturally)
 - Sentence 1 must hook instantly (conflict, accusation, shock, stakes, or challenge)
@@ -482,10 +496,10 @@ AVOID THESE PHRASES:
 - "starts calm, ends...", "by the end", "in this clip"
 - soft scenic lead-ins like "morning mist..." unless tied to immediate tension
 
-EXAMPLES OF GOOD HOOK STYLE:
-- "He walked in smiling like nothing happened, but every face in that room says he lied 😬 You trusting that story or calling it out?"
-- "She holds eye contact like she already knows the truth 💀 If you were in that room, would you stay quiet?"
-- "Nobody says a word, but the tension is loud enough to start a fight 👀 You backing this or exposing it?"
+MODE RULES:
+- drama_conflict: prioritize direct clash, accusation, betrayal, or confrontation.
+- mystery_curiosity: prioritize unanswered question, hidden detail, or suspicious mismatch.
+- outrage_opinion: prioritize hot take, judgment, accountability, or "pick a side" framing.
 
 HASHTAGS:
 - 4-5 lowercase tags
@@ -499,10 +513,66 @@ CAPTION:
 HASHTAGS:
 [hashtags here]"""
 
+
+CAPTION_STYLE_MODES = [
+    "drama_conflict",
+    "mystery_curiosity",
+    "outrage_opinion",
+]
+
+def _looks_like_music_or_noise(transcript: str) -> bool:
+    t = (transcript or "").strip().lower()
+    if not t:
+        return True
+
+    markers = ["[music]", "(music)", "instrumental", "beat drop", "la la", "humming"]
+    if any(m in t for m in markers):
+        return True
+
+    # Mostly non-word content or extremely short usually means no usable speech.
+    words = re.findall(r"[a-zA-Z']+", t)
+    if len(words) < 4:
+        return True
+
+    alpha_ratio = (sum(ch.isalpha() for ch in t) / max(1, len(t)))
+    return alpha_ratio < 0.45
+
+
+def transcribe_audio_openai(api_key: str, audio_path: Optional[str]) -> str:
+    if not audio_path or not os.path.exists(audio_path):
+        return ""
+
+    try:
+        headers = {"Authorization": f"Bearer {api_key}"}
+        with open(audio_path, "rb") as af:
+            files = {"file": (os.path.basename(audio_path), af, "audio/mpeg")}
+            data = {"model": "gpt-4o-mini-transcribe"}
+            resp = requests.post(
+                OPENAI_TRANSCRIBE_BASE,
+                headers=headers,
+                files=files,
+                data=data,
+                timeout=45,
+            )
+
+        if resp.status_code in (401, 403):
+            print(f"Transcription auth error {resp.status_code}; falling back to visual-only cues")
+            return ""
+
+        resp.raise_for_status()
+        payload = resp.json()
+        return (payload.get("text") or "").strip()
+    except Exception as e:
+        print(f"Transcription failed: {e}")
+        return ""
+
+
 def generate_caption_openai(api_key: str,
                            frames: List[str],
                            audio: Optional[str],
-                           pov_mode: str) -> Dict[str, str]:
+                           pov_mode: str,
+                           transcript: str = "",
+                           style_mode: str = "drama_conflict") -> Dict[str, str]:
     """
     Generate caption using OpenAI Vision API with multiple frames.
     """
@@ -530,11 +600,27 @@ def generate_caption_openai(api_key: str,
             }
         })
     
-    # Build prompt (audio is currently not included as model input).
+    effective_audio_weight = AUDIO_WEIGHT
+    effective_frame_weight = FRAME_WEIGHT
+
+    if _looks_like_music_or_noise(transcript):
+        effective_audio_weight = 0.20
+        effective_frame_weight = 0.80
+
+    # Build prompt.
     prompt = CAPTION_PROMPT.format(
         num_frames=len(frames),
-        pov_mode=pov_mode
+        pov_mode=pov_mode,
+        audio_weight=f"{effective_audio_weight:.2f}",
+        frame_weight=f"{effective_frame_weight:.2f}",
+        style_mode=style_mode,
     )
+
+    if transcript:
+        content.append({
+            "type": "text",
+            "text": f"Transcript (prioritize if speech is meaningful): {transcript}"
+        })
     
     content.append({
         "type": "text",
@@ -699,12 +785,15 @@ def process_batch(job_id: str, video_paths: List[str], api_key: str):
                     )
 
                 pov_mode = pov_modes[idx] if idx < len(pov_modes) else "THIRD PERSON"
+                style_mode = CAPTION_STYLE_MODES[idx % len(CAPTION_STYLE_MODES)]
                 
                 caption_data = generate_caption_openai(
                     api_key=api_key,
                     frames=extraction.frames,
                     audio=extraction.audio,
-                    pov_mode=pov_mode
+                    pov_mode=pov_mode,
+                    transcript=(transcribe_audio_openai(api_key, extraction.audio) if TRANSCRIBE_AUDIO else ""),
+                    style_mode=style_mode,
                 )
                 
                 print(f"  ✓ Caption generated for {extraction.video_name}")
