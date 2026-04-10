@@ -33,7 +33,7 @@ TEMP_DIR        = "/sdcard/Download/scoopz_temp"
 # Clipboard behavior: auto-copy captions one-by-one to build clipboard history.
 # Note: Android only has ONE active clipboard item; this relies on your
 # keyboard/clipboard manager keeping a history of recent copies.
-CLIPBOARD_AUTO_CYCLE = False
+CLIPBOARD_AUTO_CYCLE = True
 CLIPBOARD_CYCLE_DELAY_SEC = 3.0
 CLIPBOARD_COPY_RETRIES = 3
 CLIPBOARD_RETRY_DELAY_SEC = 0.8
@@ -172,6 +172,18 @@ def print_batch_results(results: List[CaptionResult]):
         print(r.caption)
         print(r.hashtags)
     print("\n" + "=" * 72 + "\n")
+
+
+def build_raw_captions_text(results: List[CaptionResult]) -> str:
+    """Build raw caption blocks for single clipboard copy."""
+    blocks = []
+    for r in results:
+        if r.error:
+            continue
+        block = f"{r.caption}\n\n{r.hashtags}".strip()
+        if block:
+            blocks.append(block)
+    return "\n\n\n".join(blocks)
 
 
 def format_single_caption_for_clipboard(result: CaptionResult, index: int) -> str:
@@ -889,8 +901,19 @@ def process_batch(job_id: str, video_paths: List[str], api_key: str):
             processing_jobs[job_id]["clipboard_total"] = len(safe_results)
 
         print_batch_results(safe_results)
-        notify("Batch Complete", f"{len(safe_results)} captions printed in terminal", "scoopz_batch")
-        toast(f"{len(safe_results)} captions printed")
+
+        if CLIPBOARD_AUTO_CYCLE:
+            notify("Batch Complete", f"Copying {len(safe_results)} captions to clipboard...", "scoopz_batch")
+            auto_cycle_clipboard(job_id, safe_results)
+        else:
+            raw_text = build_raw_captions_text(safe_results)
+            copied = copy_to_clipboard(raw_text) if raw_text else False
+            if copied:
+                notify("Batch Complete", f"{len(safe_results)} captions printed + copied", "scoopz_batch")
+                toast("Captions copied to clipboard")
+            else:
+                notify("Batch Complete", f"{len(safe_results)} captions printed in terminal", "scoopz_batch")
+                toast(f"{len(safe_results)} captions printed")
         
     except Exception as e:
         print(f"Batch processing error: {e}")
