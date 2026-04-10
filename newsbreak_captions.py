@@ -33,7 +33,7 @@ TEMP_DIR        = "/sdcard/Download/scoopz_temp"
 # Clipboard behavior: auto-copy captions one-by-one to build clipboard history.
 # Note: Android only has ONE active clipboard item; this relies on your
 # keyboard/clipboard manager keeping a history of recent copies.
-CLIPBOARD_AUTO_CYCLE = True
+CLIPBOARD_AUTO_CYCLE = False
 CLIPBOARD_CYCLE_DELAY_SEC = 3.0
 CLIPBOARD_COPY_RETRIES = 3
 CLIPBOARD_RETRY_DELAY_SEC = 0.8
@@ -869,36 +869,12 @@ def process_batch(job_id: str, video_paths: List[str], api_key: str):
             safe_results.append(r)
 
         with jobs_lock:
-            processing_jobs[job_id]["status"] = "copying"
+            processing_jobs[job_id]["status"] = "done"
             processing_jobs[job_id]["results"] = [asdict(r) for r in safe_results]
             processing_jobs[job_id]["clipboard_total"] = len(safe_results)
-            processing_jobs[job_id]["clipboard_mode"] = "auto_cycle" if CLIPBOARD_AUTO_CYCLE else "single"
-            processing_jobs[job_id]["clipboard_copied"] = 0
-            processing_jobs[job_id]["clipboard_failed"] = 0
 
-        # Auto-copy each caption to clipboard sequentially.
-        if CLIPBOARD_AUTO_CYCLE:
-            notify("Batch Complete", f"Copying {len(safe_results)} captions to clipboard...", "scoopz_batch")
-            copy_stats = auto_cycle_clipboard(job_id, safe_results)
-        else:
-            # Fallback: copy only the first caption.
-            copied = 0
-            failed = 0
-            if safe_results:
-                if _copy_with_retries(format_single_caption_for_clipboard(safe_results[0], 1)):
-                    copied = 1
-                    notify("Batch Complete", "Caption 1 copied", "scoopz_batch")
-                    toast("Caption 1 copied")
-                else:
-                    failed = 1
-                    notify("Error", "Clipboard copy failed", "scoopz_error")
-            copy_stats = {"copied": copied, "failed": failed, "failed_indices": []}
-
-        with jobs_lock:
-            processing_jobs[job_id]["status"] = "done"
-            processing_jobs[job_id]["clipboard_copied"] = int(copy_stats.get("copied", 0))
-            processing_jobs[job_id]["clipboard_failed"] = int(copy_stats.get("failed", 0))
-            processing_jobs[job_id]["clipboard_failed_indices"] = copy_stats.get("failed_indices", [])
+        notify("Batch Complete", f"{len(safe_results)} captions ready to copy", "scoopz_batch")
+        toast(f"{len(safe_results)} captions ready")
         
     except Exception as e:
         print(f"Batch processing error: {e}")
@@ -983,6 +959,17 @@ def build_html(videos: List[str]) -> str:
   .msg{{color:#fff;font-size:16px;font-weight:600}}
   .detail{{color:#aaa;font-size:13px}}
   .progress{{color:#00ff88;font-size:14px;margin-top:8px}}
+    .results{{display:none;padding:12px 10px 90px}}
+    .results.show{{display:block}}
+    .results h2{{color:#fff;font-size:14px;margin:2px 4px 10px}}
+    .result-card{{background:#111;border:1px solid #262626;border-radius:8px;padding:10px;margin:0 4px 10px}}
+    .result-top{{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px}}
+    .result-name{{color:#9aa0a6;font-size:11px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}}
+    .copy-btn{{background:#00ff88;color:#000;border:none;border-radius:6px;padding:7px 10px;font-size:12px;font-weight:700;cursor:pointer}}
+    .copy-btn:active{{transform:scale(0.98)}}
+    .copy-btn.done{{background:#2ecc71}}
+    .cap-text{{color:#fff;font-size:14px;line-height:1.35;white-space:pre-wrap}}
+    .tag-text{{color:#7fd5a1;font-size:13px;line-height:1.35;white-space:pre-wrap;margin-top:8px}}
   @keyframes spin{{to{{transform:rotate(360deg)}}}}
 </style>
 </head>
@@ -993,6 +980,10 @@ def build_html(videos: List[str]) -> str:
     <div class="stats">4 frames per video · ~6s per video · parallel processing</div>
 </header>
 <div class="grid">{cards}</div>
+<div class="results" id="results">
+    <h2>Captions</h2>
+    <div id="resultsList"></div>
+</div>
 <button class="fab" id="fab" onclick="processSelected()">
   <span class="counter" id="counter">0</span>
   GO
@@ -1011,6 +1002,8 @@ const overlay = document.getElementById('overlay');
 const msg = document.getElementById('msg');
 const detail = document.getElementById('detail');
 const progress = document.getElementById('progress');
+const results = document.getElementById('results');
+const resultsList = document.getElementById('resultsList');
 
 function toggleSelect(i) {{
   const card = document.querySelector(`[data-index="${{i}}"]`);
@@ -1031,6 +1024,52 @@ function toggleSelect(i) {{
 function updateFab() {{
   counter.textContent = selected.size;
   fab.classList.toggle('show', selected.size > 0);
+}}
+
+function escapeHtml(text) {{
+    return (text || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+}}
+
+async function copyCaption(text, btn) {{
+    try {{
+        await navigator.clipboard.writeText(text);
+        btn.textContent = 'Copied';
+        btn.classList.add('done');
+        setTimeout(() => {{
+            btn.textContent = 'Copy';
+            btn.classList.remove('done');
+        }}, 1200);
+    }} catch (e) {{
+        alert('Copy failed on this browser.');
+    }}
+}}
+
+function renderResults(items) {{
+    if (!Array.isArray(items) || items.length === 0) return;
+    const html = items.map((r, idx) => {{
+        const caption = r.error ? `Error: ${{r.error || 'Unknown error'}}` : (r.caption || '');
+        const hashtags = r.error ? '' : (r.hashtags || '');
+        const combined = hashtags ? `${{caption}}\n\n${{hashtags}}` : caption;
+        const payload = JSON.stringify(combined);
+        return `
+            <div class="result-card">
+                <div class="result-top">
+                    <div class="result-name">${{idx + 1}}. ${{escapeHtml(r.video_name || 'video')}}</div>
+                    <button class="copy-btn" onclick='copyCaption(${{payload}}, this)'>Copy</button>
+                </div>
+                <div class="cap-text">${{escapeHtml(caption)}}</div>
+                ${{hashtags ? `<div class="tag-text">${{escapeHtml(hashtags)}}</div>` : ''}}
+            </div>`;
+    }}).join('');
+
+    resultsList.innerHTML = html;
+    results.classList.add('show');
+    window.scrollTo({{ top: document.body.scrollHeight, behavior: 'smooth' }});
 }}
 
 async function processSelected() {{
@@ -1061,22 +1100,12 @@ async function processSelected() {{
       }} else if (status.status === 'generating') {{
         msg.textContent = 'Generating captions...';
         progress.textContent = `${{status.completed}}/${{status.total}}`;
-            }} else if (status.status === 'copying') {{
-                msg.textContent = 'Copying to clipboard history...';
-                const copied = (status.clipboard_copied ?? 0);
-                const total = (status.clipboard_total ?? 0);
-                const failed = (status.clipboard_failed ?? 0);
-                progress.textContent = `${{copied}}/${{total}} copied`;
-                detail.textContent = failed > 0 ? `${{failed}} copy failures so far` : 'Using slower safe copy mode';
       }} else if (status.status === 'done') {{
         msg.textContent = 'Done!';
-                const copied = (status.clipboard_copied ?? status.clipboard_total ?? 0);
                 const total = (status.clipboard_total ?? 0);
-                const failed = (status.clipboard_failed ?? 0);
-                detail.textContent = total > 0
-                    ? `Copied ${{copied}}/${{total}} captions${{failed > 0 ? ` · failed ${{failed}}` : ''}}`
-                    : 'Copied to clipboard';
+                detail.textContent = total > 0 ? `${{total}} captions ready. Tap Copy on each one.` : 'No captions generated';
         progress.textContent = '';
+                renderResults(status.results || []);
         setTimeout(() => {{
           overlay.classList.remove('show');
           selected.clear();
