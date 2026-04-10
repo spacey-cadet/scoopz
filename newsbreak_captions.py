@@ -471,6 +471,7 @@ SIGNAL WEIGHTS:
 - Visual frames weight: {frame_weight}
 - Default behavior: prioritize spoken words, claims, arguments, admissions, and key quotes from transcript.
 - If transcript appears to be mostly music/noise/empty/unclear, ignore audio weight and prioritize visuals.
+- If audio is background music, use it only for mood (tone/energy), not factual scene details.
 
 STYLE MODE: {style_mode}
 
@@ -482,6 +483,7 @@ REQUIREMENTS:
 - 2-3 emojis total (distributed naturally)
 - Sentence 1 must hook instantly (conflict, accusation, shock, stakes, or challenge)
 - Sentence 2 must escalate tension and force a reaction (question, judgment, or dare)
+- Include at least one specific anchor detail (object/action/phrase) that clearly ties caption to this video.
 - Do NOT narrate calmly or describe scenery like a recap
 - Do NOT mention frames/shots/timeline progression explicitly
 
@@ -600,10 +602,12 @@ def generate_caption_openai(api_key: str,
             }
         })
     
+    transcript_is_music_or_noise = _looks_like_music_or_noise(transcript)
+
     effective_audio_weight = AUDIO_WEIGHT
     effective_frame_weight = FRAME_WEIGHT
 
-    if _looks_like_music_or_noise(transcript):
+    if transcript_is_music_or_noise:
         effective_audio_weight = 0.20
         effective_frame_weight = 0.80
 
@@ -616,10 +620,15 @@ def generate_caption_openai(api_key: str,
         style_mode=style_mode,
     )
 
-    if transcript:
+    if transcript and not transcript_is_music_or_noise:
         content.append({
             "type": "text",
             "text": f"Transcript (prioritize if speech is meaningful): {transcript}"
+        })
+    elif transcript and transcript_is_music_or_noise:
+        content.append({
+            "type": "text",
+            "text": "Audio appears to be mostly background music/noise. Use it only as mood; do not infer scene facts from it."
         })
     
     content.append({
