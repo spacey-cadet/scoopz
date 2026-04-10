@@ -23,6 +23,7 @@ import requests
 OPENAI_KEY_FILE = os.path.expanduser("~/.config/openai_key.txt")
 OPENAI_MODEL    = "gpt-4o"
 OPENAI_BASE     = "https://api.openai.com/v1/chat/completions"
+OPENAI_MODELS_BASE = "https://api.openai.com/v1/models"
 
 SCOOPZ_DIR      = "/sdcard/Pictures/scoopz"
 THUMB_DIR       = "/sdcard/Pictures/scoopz/.thumbs"
@@ -32,13 +33,16 @@ TEMP_DIR        = "/sdcard/Download/scoopz_temp"
 # Note: Android only has ONE active clipboard item; this relies on your
 # keyboard/clipboard manager keeping a history of recent copies.
 CLIPBOARD_AUTO_CYCLE = True
-CLIPBOARD_CYCLE_DELAY_SEC = 2.0
+CLIPBOARD_CYCLE_DELAY_SEC = 3.0
+CLIPBOARD_COPY_RETRIES = 3
+CLIPBOARD_RETRY_DELAY_SEC = 0.8
 
 MAX_BATCH_SIZE  = 8
 EXTRACTION_WORKERS = 3  # Parallel ffmpeg extractions
 API_WORKERS        = 3  # Parallel OpenAI API calls (safe for GPT-4o rate limits)
 NUM_FRAMES         = 4  # Extract 4 frames per video
 PORT               = 8765
+EXTRACT_AUDIO      = False  # Audio is not sent to caption generation in current flow.
 
 POV_STATE_FILE = os.path.expanduser("~/.cache/scoopz_pov.json")
 
@@ -98,9 +102,42 @@ def copy_to_clipboard(text):
     except:
         return False
 
+
 def load_api_key():
+    # Prefer environment variable when provided.
+    env_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if env_key:
+        return env_key.strip('"').strip("'")
+
     with open(OPENAI_KEY_FILE) as f:
-        return f.read().strip()
+        key = f.read().strip()
+        return key.strip('"').strip("'")
+
+
+def validate_api_key(api_key: str) -> Optional[str]:
+    """Return None when key seems valid, else a readable error string."""
+    if not api_key:
+        return "API key is empty"
+
+    if " " in api_key:
+        return "API key contains spaces; check for accidental copy/paste formatting"
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+    }
+
+    try:
+        resp = requests.get(OPENAI_MODELS_BASE, headers=headers, timeout=12)
+        if resp.status_code == 401:
+            return "Unauthorized (401): invalid API key, revoked key, or wrong project"
+        if resp.status_code == 403:
+            return "Forbidden (403): project/account does not have access"
+        if resp.status_code >= 400:
+            return f"OpenAI validation failed: HTTP {resp.status_code}"
+        return None
+    except requests.RequestException as e:
+        return f"Could not validate OpenAI key: {e}"
+
 
 def cleanup_temp_files(job_id: str):
     pattern = f"{job_id}_"
@@ -121,23 +158,56 @@ def format_single_caption_for_clipboard(result: CaptionResult, index: int) -> st
     return f"{result.caption}\n\n{result.hashtags}".strip()
 
 
-def auto_cycle_clipboard(results: List[CaptionResult]):
+def _copy_with_retries(text: str) -> bool:
+    for attempt in range(1, CLIPBOARD_COPY_RETRIES + 1):
+        if copy_to_clipboard(text):
+            return True
+        if attempt < CLIPBOARD_COPY_RETRIES:
+            time.sleep(CLIPBOARD_RETRY_DELAY_SEC)
+    return False
+
+
+def auto_cycle_clipboard(job_id: str, results: List[CaptionResult]) -> Dict[str, object]:
     """Copy captions one-by-one to clipboard with a delay.
 
     This is intended to populate Android clipboard history.
     """
     total = len(results)
+    copied = 0
+    failed_indices: List[int] = []
+
     for i, r in enumerate(results, 1):
         text = format_single_caption_for_clipboard(r, i)
-        ok = copy_to_clipboard(text)
+        ok = _copy_with_retries(text)
         if not ok:
-            notify("Error", f"Clipboard copy failed at {i}/{total}", "scoopz_error")
-            return
-        toast(f"Copied {i}/{total}")
+            failed_indices.append(i)
+            toast(f"Copy failed {i}/{total}")
+        else:
+            copied += 1
+            toast(f"Copied {i}/{total}")
+
+        with jobs_lock:
+            if job_id in processing_jobs:
+                processing_jobs[job_id]["clipboard_copied"] = copied
+                processing_jobs[job_id]["clipboard_failed"] = len(failed_indices)
+
         # Give clipboard history time to register each entry.
         time.sleep(CLIPBOARD_CYCLE_DELAY_SEC)
 
-    notify("Batch Complete", f"Copied {total} captions to clipboard", "scoopz_batch")
+    if failed_indices:
+        notify(
+            "Batch Complete (Partial)",
+            f"Copied {copied}/{total}. Failed: {','.join(str(x) for x in failed_indices)}",
+            "scoopz_batch"
+        )
+    else:
+        notify("Batch Complete", f"Copied {total}/{total} captions to clipboard", "scoopz_batch")
+
+    return {
+        "copied": copied,
+        "failed": len(failed_indices),
+        "failed_indices": failed_indices,
+    }
 
 # ── POV Rotation ──────────────────────────────────────────
 def load_pov_state():
@@ -324,8 +394,9 @@ def extract_video_assets(video_path: str, job_id: str, video_idx: int) -> Extrac
             seek_time = max(0.5, duration * pos)
             futures[executor.submit(extract_frame, seek_time, frame_paths[i])] = f"frame{i}"
         
-        # Submit audio extraction
-        futures[executor.submit(extract_audio_clip, audio_path)] = "audio"
+        # Submit audio extraction only if explicitly enabled.
+        if EXTRACT_AUDIO:
+            futures[executor.submit(extract_audio_clip, audio_path)] = "audio"
         
         results = {}
         for future in as_completed(futures):
@@ -342,7 +413,7 @@ def extract_video_assets(video_path: str, job_id: str, video_idx: int) -> Extrac
         if results.get(f"frame{i}")
     ]
     
-    audio_ok = audio_path if results.get("audio") else None
+    audio_ok = audio_path if (EXTRACT_AUDIO and results.get("audio")) else None
     
     if not successful_frames:
         return ExtractionResult(
@@ -365,7 +436,7 @@ def extract_video_assets(video_path: str, job_id: str, video_idx: int) -> Extrac
     )
 
 # ── OPTIMIZED CAPTION GENERATION (4 frames context) ───────
-CAPTION_PROMPT = """Write a punchy, scroll-stopping caption based on these {num_frames} video frames{audio_note}.
+CAPTION_PROMPT = """Write a punchy, scroll-stopping caption based on these {num_frames} video frames.
 
 POV: {pov_mode}
 
@@ -402,8 +473,8 @@ CAPTION:
 HASHTAGS:
 [hashtags here]"""
 
-def generate_caption_openai(api_key: str, 
-                           frames: List[str], 
+def generate_caption_openai(api_key: str,
+                           frames: List[str],
                            audio: Optional[str],
                            pov_mode: str) -> Dict[str, str]:
     """
@@ -433,11 +504,9 @@ def generate_caption_openai(api_key: str,
             }
         })
     
-    # Build prompt
-    audio_note = " and audio" if audio else ""
+    # Build prompt (audio is currently not included as model input).
     prompt = CAPTION_PROMPT.format(
         num_frames=len(frames),
-        audio_note=audio_note,
         pov_mode=pov_mode
     )
     
@@ -474,6 +543,11 @@ def generate_caption_openai(api_key: str,
                 timeout=35  # Slightly longer timeout for 4 frames
             )
             
+            if response.status_code in (401, 403):
+                raise Exception(
+                    f"Auth error {response.status_code}. Check OPENAI_API_KEY or {OPENAI_KEY_FILE}"
+                )
+
             if response.status_code == 429:
                 wait_time = 5 * (attempt + 1)
                 print(f"Rate limit hit, waiting {wait_time}s...")
@@ -666,25 +740,36 @@ def process_batch(job_id: str, video_paths: List[str], api_key: str):
             safe_results.append(r)
 
         with jobs_lock:
-            processing_jobs[job_id]["status"] = "done"
+            processing_jobs[job_id]["status"] = "copying"
             processing_jobs[job_id]["results"] = [asdict(r) for r in safe_results]
-
-        with jobs_lock:
             processing_jobs[job_id]["clipboard_total"] = len(safe_results)
             processing_jobs[job_id]["clipboard_mode"] = "auto_cycle" if CLIPBOARD_AUTO_CYCLE else "single"
+            processing_jobs[job_id]["clipboard_copied"] = 0
+            processing_jobs[job_id]["clipboard_failed"] = 0
 
         # Auto-copy each caption to clipboard sequentially.
         if CLIPBOARD_AUTO_CYCLE:
             notify("Batch Complete", f"Copying {len(safe_results)} captions to clipboard...", "scoopz_batch")
-            threading.Thread(target=auto_cycle_clipboard, args=(safe_results,), daemon=True).start()
+            copy_stats = auto_cycle_clipboard(job_id, safe_results)
         else:
             # Fallback: copy only the first caption.
+            copied = 0
+            failed = 0
             if safe_results:
-                if copy_to_clipboard(format_single_caption_for_clipboard(safe_results[0], 1)):
+                if _copy_with_retries(format_single_caption_for_clipboard(safe_results[0], 1)):
+                    copied = 1
                     notify("Batch Complete", "Caption 1 copied", "scoopz_batch")
                     toast("Caption 1 copied")
                 else:
+                    failed = 1
                     notify("Error", "Clipboard copy failed", "scoopz_error")
+            copy_stats = {"copied": copied, "failed": failed, "failed_indices": []}
+
+        with jobs_lock:
+            processing_jobs[job_id]["status"] = "done"
+            processing_jobs[job_id]["clipboard_copied"] = int(copy_stats.get("copied", 0))
+            processing_jobs[job_id]["clipboard_failed"] = int(copy_stats.get("failed", 0))
+            processing_jobs[job_id]["clipboard_failed_indices"] = copy_stats.get("failed_indices", [])
         
     except Exception as e:
         print(f"Batch processing error: {e}")
@@ -846,10 +931,21 @@ async function processSelected() {{
       }} else if (status.status === 'generating') {{
         msg.textContent = 'Generating captions...';
         progress.textContent = `${{status.completed}}/${{status.total}}`;
+            }} else if (status.status === 'copying') {{
+                msg.textContent = 'Copying to clipboard history...';
+                const copied = (status.clipboard_copied ?? 0);
+                const total = (status.clipboard_total ?? 0);
+                const failed = (status.clipboard_failed ?? 0);
+                progress.textContent = `${{copied}}/${{total}} copied`;
+                detail.textContent = failed > 0 ? `${{failed}} copy failures so far` : 'Using slower safe copy mode';
       }} else if (status.status === 'done') {{
         msg.textContent = 'Done!';
-                const n = (status.clipboard_total ?? 0);
-                detail.textContent = n > 0 ? `Copied ${{n}} captions to clipboard (history)` : 'Copied to clipboard';
+                const copied = (status.clipboard_copied ?? status.clipboard_total ?? 0);
+                const total = (status.clipboard_total ?? 0);
+                const failed = (status.clipboard_failed ?? 0);
+                detail.textContent = total > 0
+                    ? `Copied ${{copied}}/${{total}} captions${{failed > 0 ? ` · failed ${{failed}}` : ''}}`
+                    : 'Copied to clipboard';
         progress.textContent = '';
         setTimeout(() => {{
           overlay.classList.remove('show');
@@ -965,6 +1061,14 @@ def main():
     except FileNotFoundError:
         notify("Error", f"No API key at {OPENAI_KEY_FILE}", "scoopz_error")
         print(f"ERROR: Create {OPENAI_KEY_FILE} with your OpenAI API key")
+        print("Tip: you can also export OPENAI_API_KEY in your shell.")
+        sys.exit(1)
+
+    key_error = validate_api_key(api_key)
+    if key_error:
+        notify("Error", "OpenAI key validation failed", "scoopz_error")
+        print(f"ERROR: {key_error}")
+        print(f"Checked env OPENAI_API_KEY, then file: {OPENAI_KEY_FILE}")
         sys.exit(1)
     
     videos = load_videos()
