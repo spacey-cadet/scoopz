@@ -532,7 +532,6 @@ MODE RULES:
 
 HASHTAGS:
 - 4-5 lowercase tags
-- Include ONE of: #breakingnews or #localnews
 - No platform tags (no #tiktok, #instagram, etc.)
 
 OUTPUT FORMAT:
