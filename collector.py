@@ -42,14 +42,17 @@ class ScoopzHybrid:
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         })
-        self.done = 0
+        self.downloaded = 0
+        self.skipped = 0
         self.failed = 0
         self.active = 0
         self.history = set(HISTORY_FILE.read_text().splitlines())
     
     def update_ui(self):
         queued = self.queue.qsize()
-        sys.stdout.write(f"\r\033[K ⬇️  Active: {self.active} | ✅ Done: {self.done} | ❌ Fail: {self.failed} | 🕒 Queued: {queued}")
+        sys.stdout.write(
+            f"\r\033[K ⬇️  Active: {self.active} | ✅ Downloaded: {self.downloaded} | ⏭️ Skipped: {self.skipped} | ❌ Fail: {self.failed} | 🕒 Queued: {queued}"
+        )
         sys.stdout.flush()
     
     def send_notification(self, title, msg):
@@ -164,6 +167,7 @@ class ScoopzHybrid:
             return False
 
         def _looks_valid_mp4(path: Path) -> bool:
+            ffprobe_ok = None
             try:
                 if not path.exists():
                     return False
@@ -195,11 +199,15 @@ class ScoopzHybrid:
                     dur = float(dur_s)
                 except Exception:
                     dur = 0.0
-                return dur > 0.5
+                ffprobe_ok = dur > 0.5
             except FileNotFoundError:
                 # ffprobe not installed; best-effort fallback already checked size.
                 pass
             except Exception:
+                return False
+
+            # If ffprobe ran, require a reasonable positive duration.
+            if ffprobe_ok is False:
                 return False
 
             if VALIDATE_THUMBNAIL and not _can_extract_thumbnail(path):
@@ -303,7 +311,7 @@ class ScoopzHybrid:
                 
                 # Check history early to save bandwidth
                 if video_id in self.history:
-                    self.done += 1
+                    self.skipped += 1
                     continue
                 
                 # Prioritize HD, fallback to standard, fail gracefully if it's a photo post
@@ -321,7 +329,7 @@ class ScoopzHybrid:
                 if success:
                     subprocess.run(["termux-media-scan", str(final_path)], capture_output=True)
                     self.add_to_history(video_id)
-                    self.done += 1
+                    self.downloaded += 1
                     self.send_notification("Scoopz Downloaded", f"Saved {video_id} to Gallery")
                 else:
                     self.failed += 1
