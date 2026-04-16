@@ -505,7 +505,7 @@ STYLE MODE: {style_mode}
 CONTEXT: You're seeing {num_frames} frames across the video (beginning, early-mid, late-mid, end). Use the progression to identify tension, shifts, or reveals.
 
 REQUIREMENTS:
-- no more than 155 characters total
+- no more than 162 characters total
 - 2 sentences exactly
 - 2-3 emojis total (distributed naturally)
 - Sentence 1 must hook instantly (conflict, accusation, shock, stakes, or challenge)
