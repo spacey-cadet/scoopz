@@ -532,6 +532,7 @@ MODE RULES:
 
 HASHTAGS:
 - 4-5 lowercase tags
+
 - No platform tags (no #tiktok, #instagram, etc.)
 
 OUTPUT FORMAT:
@@ -547,6 +548,63 @@ CAPTION_STYLE_MODES = [
     "mystery_curiosity",
     "outrage_opinion",
 ]
+
+
+def _extract_hashtags(text: str) -> List[str]:
+    return re.findall(r"#([a-z0-9_]+)", (text or "").lower())
+
+
+def _looks_like_breaking_story(caption: str, transcript: str) -> bool:
+    """Heuristic: only mark breaking when urgency signals are present."""
+    combined = f"{caption or ''} {transcript or ''}".lower()
+    triggers = [
+        "breaking",
+        "just in",
+        "developing",
+        "urgent",
+        "right now",
+        "live now",
+        "confirmed",
+        "official statement",
+    ]
+    return any(t in combined for t in triggers)
+
+
+def normalize_hashtags(hashtags_text: str, caption: str, transcript: str) -> str:
+    """Enforce Scoopz hashtag strategy with typo correction and dedupe."""
+    extracted = _extract_hashtags(hashtags_text)
+
+    typo_map = {
+        "loclanews": "localnews",
+    }
+
+    normalized: List[str] = []
+    for tag in extracted:
+        tag = typo_map.get(tag, tag)
+        if tag and tag not in normalized:
+            normalized.append(tag)
+
+    if "scoopz" not in normalized:
+        normalized.insert(0, "scoopz")
+
+    if "localnews" not in normalized:
+        normalized.append("localnews")
+
+    if _looks_like_breaking_story(caption, transcript):
+        if "breakingnews" not in normalized:
+            normalized.append("breakingnews")
+    else:
+        normalized = [t for t in normalized if t != "breakingnews"]
+
+    # Add lightweight general discovery tags requested for Scoopz distribution.
+    for generic_tag in ["trending", "foryou", "funny"]:
+        if generic_tag not in normalized:
+            normalized.append(generic_tag)
+
+    # Keep the list tight to avoid noisy hashtag stuffing.
+    normalized = normalized[:7]
+
+    return " ".join(f"#{t}" for t in normalized)
 
 def _looks_like_music_or_noise(transcript: str) -> bool:
     t = (transcript or "").strip().lower()
@@ -821,14 +879,21 @@ def process_batch(job_id: str, video_paths: List[str], api_key: str):
 
                 pov_mode = pov_modes[idx] if idx < len(pov_modes) else "THIRD PERSON"
                 style_mode = CAPTION_STYLE_MODES[idx % len(CAPTION_STYLE_MODES)]
+                transcript_text = (transcribe_audio_openai(api_key, extraction.audio) if TRANSCRIBE_AUDIO else "")
                 
                 caption_data = generate_caption_openai(
                     api_key=api_key,
                     frames=extraction.frames,
                     audio=extraction.audio,
                     pov_mode=pov_mode,
-                    transcript=(transcribe_audio_openai(api_key, extraction.audio) if TRANSCRIBE_AUDIO else ""),
+                    transcript=transcript_text,
                     style_mode=style_mode,
+                )
+
+                caption_data["hashtags"] = normalize_hashtags(
+                    caption_data.get("hashtags", ""),
+                    caption_data.get("caption", ""),
+                    transcript_text,
                 )
                 
                 print(f"  ✓ Caption generated for {extraction.video_name}")
