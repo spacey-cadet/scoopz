@@ -28,6 +28,30 @@ Give Termux storage permission (required for /sdcard access):
 termux-setup-storage
 ```
 
+## Install the Shell Script Commands
+
+The project includes `scoopz_env.sh`, which adds shortcut commands like `collect`, `caption`, and `scoopz-help`.
+
+1. Put this project at `~/scoopz` (or update `SCOOPZ_DIR` inside `scoopz_env.sh` to your real folder).
+2. Source the script from your shell startup.
+
+Run:
+
+```bash
+cd ~/scoopz
+chmod +x scoopz_env.sh
+echo 'source ~/scoopz/scoopz_env.sh' >> ~/.bashrc
+source ~/.bashrc
+```
+
+Verify installation:
+
+```bash
+scoopz-help
+```
+
+You should see: `Scoopz ready` and the list of workflow commands.
+
 ## Required Folders and Files
 
 The current code expects:
