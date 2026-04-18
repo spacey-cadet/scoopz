@@ -489,7 +489,7 @@ def extract_video_assets(video_path: str, job_id: str, video_idx: int) -> Extrac
     )
 
 # ── OPTIMIZED CAPTION GENERATION (4 frames context) ───────
-CAPTION_PROMPT = """Write a punchy, scroll-stopping caption based on these {num_frames} video frames.
+CAPTION_PROMPT = """Write a HIGH-CONVERSION caption based on these {num_frames} video frames.
 
 POV: {pov_mode}
 
@@ -497,12 +497,16 @@ SIGNAL WEIGHTS:
 - Audio/transcript weight: {audio_weight}
 - Visual frames weight: {frame_weight}
 - Default behavior: prioritize spoken words, claims, arguments, admissions, and key quotes from transcript.
-- If transcript appears to be mostly music/noise/empty/unclear, ignore audio weight and prioritize visuals.
+- If transcript appears to be mostly music/noise/empty/unclear, prioritize visuals.
 - If audio is background music, use it only for mood (tone/energy), not factual scene details.
 
 STYLE MODE: {style_mode}
 
-CONTEXT: You're seeing {num_frames} frames across the video (beginning, early-mid, late-mid, end). Use the progression to identify tension, shifts, or reveals.
+CONTEXT: You're seeing {num_frames} frames across the video (beginning, early-mid, late-mid, end). Use progression only to infer tension/reveals; never mention frame order explicitly.
+
+GOAL:
+- Blend VIDEO-SPECIFIC precision with GENERAL VIRAL shareability (roughly 50/50 energy).
+- Keep it highly shareable while still anchored to real details from the content.
 
 REQUIREMENTS:
 - no more than 162 characters total
@@ -510,7 +514,9 @@ REQUIREMENTS:
 - 2-3 emojis total (distributed naturally)
 - Sentence 1 must hook instantly (conflict, accusation, shock, stakes, or challenge)
 - Sentence 2 must escalate tension and force a reaction (question, judgment, or dare)
-- Include at least one specific anchor detail (object/action/phrase) that clearly ties caption to this video.
+- Include at least one specific anchor detail (exact phrase/object/action) that clearly ties caption to this video.
+- Strongly evoke at least one: outrage, suspicion, disbelief, urgency, or moral tension.
+- Use pattern interruption (unexpected wording), avoid polished writing.
 - Do NOT narrate calmly or describe scenery like a recap
 - Do NOT mention frames/shots/timeline progression explicitly
 
@@ -519,6 +525,7 @@ STYLE:
 - Not formal, not news-like
 - Avoid generic phrasing ("this guy", "some dude")
 - Use concrete high-stakes language, not neutral observation
+- Can include relatable/funny/sarcastic/chaotic edge when it increases shareability
 
 AVOID THESE PHRASES:
 - "by frame 4", "in frame 1", "frame 2", "this shot"
@@ -531,9 +538,14 @@ MODE RULES:
 - outrage_opinion: prioritize hot take, judgment, accountability, or "pick a side" framing.
 
 HASHTAGS:
-- 4-5 lowercase tags
-
+- 4-5 tags total (all lowercase)
+- Balanced mix is REQUIRED:
+    - 2-3 video-specific tags (names/actions/topics/events tied to this content)
+    - 2-3 general viral tags (reaction/curiosity/social-energy/relatable)
+- At least one hashtag must reflect emotion/reaction
 - No platform tags (no #tiktok, #instagram, etc.)
+- Avoid dead-generic tags unless paired with strong tags
+- Avoid repeating the exact same tag mix across outputs
 
 OUTPUT FORMAT:
 CAPTION:
@@ -554,6 +566,93 @@ def _extract_hashtags(text: str) -> List[str]:
     return re.findall(r"#([a-z0-9_]+)", (text or "").lower())
 
 
+PLATFORM_TAGS = {
+    "tiktok", "instagram", "reels", "youtube", "shorts", "facebook", "snapchat"
+}
+
+GENERAL_VIRAL_POOL = [
+    "wtfmoment",
+    "thisiswild",
+    "whatdidijustwatch",
+    "peoplearecrazy",
+    "nooneisready",
+    "thisissoawkward",
+    "notokay",
+    "cantlookaway",
+    "messy",
+]
+
+REACTION_TAGS = {
+    "wtfmoment",
+    "thisiswild",
+    "whatdidijustwatch",
+    "peoplearecrazy",
+    "nooneisready",
+    "thisissoawkward",
+    "notokay",
+    "cantlookaway",
+    "messy",
+}
+
+GENERAL_HINT_TOKENS = {
+    "wtf", "wild", "crazy", "awkward", "watch", "reaction", "chaos", "messy", "relatable"
+}
+
+
+def _derive_video_specific_tags(caption: str, transcript: str) -> List[str]:
+    text = f"{caption or ''} {transcript or ''}".lower()
+
+    keyword_tags = [
+        ("court", "courtdrama"),
+        ("judge", "courtdrama"),
+        ("police", "policeinvestigation"),
+        ("officer", "policeinvestigation"),
+        ("press", "pressconference"),
+        ("conference", "pressconference"),
+        ("public", "publicreaction"),
+        ("argument", "heatedargument"),
+        ("fight", "heatedargument"),
+        ("confront", "confrontation"),
+        ("accuse", "accusation"),
+        ("scam", "scamalert"),
+        ("fraud", "scamalert"),
+        ("arrest", "arrestupdate"),
+        ("lawyer", "legaldrama"),
+    ]
+
+    tags: List[str] = []
+    for key, tag in keyword_tags:
+        if key in text and tag not in tags:
+            tags.append(tag)
+
+    # Fallback: synthesize simple topic tags from meaningful words.
+    if len(tags) < 3:
+        stopwords = {
+            "the", "and", "for", "that", "with", "this", "from", "your", "you", "they",
+            "have", "just", "what", "when", "were", "been", "about", "into", "over", "then",
+            "them", "their", "there", "would", "could", "should", "video", "caption",
+        }
+        words = re.findall(r"[a-z]{4,}", text)
+        for w in words:
+            if w in stopwords:
+                continue
+            if any(w in t for t in GENERAL_VIRAL_POOL):
+                continue
+            tag = re.sub(r"[^a-z0-9_]", "", w)
+            if tag and tag not in tags:
+                tags.append(tag)
+            if len(tags) >= 3:
+                break
+
+    return tags[:3]
+
+
+def _is_general_viral_tag(tag: str) -> bool:
+    if tag in GENERAL_VIRAL_POOL:
+        return True
+    return any(tok in tag for tok in GENERAL_HINT_TOKENS)
+
+
 def _looks_like_breaking_story(caption: str, transcript: str) -> bool:
     """Heuristic: only mark breaking when urgency signals are present."""
     combined = f"{caption or ''} {transcript or ''}".lower()
@@ -571,7 +670,7 @@ def _looks_like_breaking_story(caption: str, transcript: str) -> bool:
 
 
 def normalize_hashtags(hashtags_text: str, caption: str, transcript: str) -> str:
-    """Enforce Scoopz hashtag strategy with typo correction and dedupe."""
+    """Enforce balanced hashtag strategy (2-3 specific + 2-3 viral, total 4-5)."""
     extracted = _extract_hashtags(hashtags_text)
 
     typo_map = {
@@ -581,30 +680,62 @@ def normalize_hashtags(hashtags_text: str, caption: str, transcript: str) -> str
     normalized: List[str] = []
     for tag in extracted:
         tag = typo_map.get(tag, tag)
+        if tag in PLATFORM_TAGS:
+            continue
         if tag and tag not in normalized:
             normalized.append(tag)
 
-    if "scoopz" not in normalized:
-        normalized.insert(0, "scoopz")
+    video_specific = [t for t in normalized if not _is_general_viral_tag(t)]
+    general_viral = [t for t in normalized if _is_general_viral_tag(t)]
 
-    if "localnews" not in normalized:
-        normalized.append("localnews")
+    if len(video_specific) < 2:
+        derived = _derive_video_specific_tags(caption, transcript)
+        for t in derived:
+            if t not in video_specific and t not in general_viral:
+                video_specific.append(t)
+            if len(video_specific) >= 3:
+                break
 
-    if _looks_like_breaking_story(caption, transcript):
-        if "breakingnews" not in normalized:
-            normalized.append("breakingnews")
-    else:
-        normalized = [t for t in normalized if t != "breakingnews"]
+    # Deterministic rotation to avoid repeating exact same viral set.
+    seed = sum(ord(c) for c in f"{caption}|{transcript}")
+    pool = GENERAL_VIRAL_POOL[:]
+    if pool:
+        shift = seed % len(pool)
+        pool = pool[shift:] + pool[:shift]
 
-    # Add lightweight general discovery tags requested for Scoopz distribution.
-    for generic_tag in ["trending", "foryou", "funny"]:
-        if generic_tag not in normalized:
-            normalized.append(generic_tag)
+    for t in pool:
+        if t not in general_viral and t not in video_specific:
+            general_viral.append(t)
+        if len(general_viral) >= 3:
+            break
 
-    # Keep the list tight to avoid noisy hashtag stuffing.
-    normalized = normalized[:7]
+    if not any(t in REACTION_TAGS for t in general_viral):
+        for t in pool:
+            if t in REACTION_TAGS and t not in general_viral and t not in video_specific:
+                general_viral.insert(0, t)
+                break
 
-    return " ".join(f"#{t}" for t in normalized)
+    if _looks_like_breaking_story(caption, transcript) and "breakingnews" not in video_specific:
+        if len(video_specific) < 3:
+            video_specific.append("breakingnews")
+
+    # Tight balanced mix: target 5, minimum 4.
+    final_tags = video_specific[:3] + general_viral[:3]
+    deduped: List[str] = []
+    for t in final_tags:
+        if t and t not in deduped:
+            deduped.append(t)
+
+    if len(deduped) > 5:
+        deduped = deduped[:5]
+    if len(deduped) < 4:
+        for t in pool:
+            if t not in deduped:
+                deduped.append(t)
+            if len(deduped) >= 4:
+                break
+
+    return " ".join(f"#{t}" for t in deduped)
 
 def _looks_like_music_or_noise(transcript: str) -> bool:
     t = (transcript or "").strip().lower()
