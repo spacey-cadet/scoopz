@@ -17,12 +17,14 @@ from typing import Dict, Optional, Set, Tuple
 
 import requests
 
-# Paths
-INBOX_PATH = Path("/sdcard/Download/links_inbox.txt")
-EXPORT_DIR = Path("/sdcard/Pictures/scoopz")
-THUMB_DIR = Path("/sdcard/Pictures/scoopz/.thumbs")
-HISTORY_FILE = Path("/sdcard/Download/scoopz_history.log")
-LOG_FILE = Path("/sdcard/Download/scoopz_errors.log")
+# Paths (overridable for Termux / multi-device consistency)
+SCOOPZ_DIR = Path(os.environ.get("SCOOPZ_DIR", "/sdcard/Pictures/scoopz"))
+DOWNLOAD_DIR = Path(os.environ.get("SCOOPZ_DOWNLOAD_DIR", "/sdcard/Download"))
+INBOX_PATH = Path(os.environ.get("SCOOPZ_INBOX_PATH", str(DOWNLOAD_DIR / "links_inbox.txt")))
+EXPORT_DIR = SCOOPZ_DIR
+THUMB_DIR = Path(os.environ.get("SCOOPZ_THUMB_DIR", str(SCOOPZ_DIR / ".thumbs")))
+HISTORY_FILE = Path(os.environ.get("SCOOPZ_HISTORY_FILE", str(DOWNLOAD_DIR / "scoopz_history.log")))
+LOG_FILE = Path(os.environ.get("SCOOPZ_LOG_FILE", str(DOWNLOAD_DIR / "scoopz_errors.log")))
 
 # Network / worker settings
 TIKWM_API = "https://www.tikwm.com/api/"

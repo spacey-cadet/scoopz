@@ -26,9 +26,9 @@ OPENAI_BASE     = "https://api.openai.com/v1/chat/completions"
 OPENAI_MODELS_BASE = "https://api.openai.com/v1/models"
 OPENAI_TRANSCRIBE_BASE = "https://api.openai.com/v1/audio/transcriptions"
 
-SCOOPZ_DIR      = "/sdcard/Pictures/scoopz"
-THUMB_DIR       = "/sdcard/Pictures/scoopz/.thumbs"
-TEMP_DIR        = "/sdcard/Download/scoopz_temp"
+SCOOPZ_DIR      = os.environ.get("SCOOPZ_DIR", "/sdcard/Pictures/scoopz")
+THUMB_DIR       = os.environ.get("SCOOPZ_THUMB_DIR", os.path.join(SCOOPZ_DIR, ".thumbs"))
+TEMP_DIR        = os.environ.get("SCOOPZ_TEMP_DIR", "/sdcard/Download/scoopz_temp")
 
 # Clipboard behavior: auto-copy captions one-by-one to build clipboard history.
 # Note: Android only has ONE active clipboard item; this relies on your
@@ -78,6 +78,7 @@ class CaptionResult:
 
 processing_jobs: Dict[str, Dict] = {}
 jobs_lock = threading.Lock()
+LAST_DISCOVERY = {"existing": 0, "eligible": 0, "skipped": 0}
 
 # ── Utilities ─────────────────────────────────────────────
 def notify(title, msg, notif_id="scoopz"):
@@ -364,8 +365,12 @@ def load_videos() -> List[str]:
         existing = [f for f in files if os.path.exists(f)]
         existing.sort(key=lambda x: os.path.getmtime(x), reverse=True)
         prune_thumbnail_cache(existing)
+        LAST_DISCOVERY["existing"] = len(existing)
+        LAST_DISCOVERY["eligible"] = 0
+        LAST_DISCOVERY["skipped"] = 0
 
         if not REQUIRE_VALID_THUMBNAIL:
+            LAST_DISCOVERY["eligible"] = len(existing)
             return existing
 
         filtered = []
@@ -380,8 +385,14 @@ def load_videos() -> List[str]:
         if skipped:
             print(f"⚠ Skipped {skipped} videos with no valid thumbnail/frame extraction")
 
+        LAST_DISCOVERY["eligible"] = len(filtered)
+        LAST_DISCOVERY["skipped"] = skipped
+
         return filtered
     except:
+        LAST_DISCOVERY["existing"] = 0
+        LAST_DISCOVERY["eligible"] = 0
+        LAST_DISCOVERY["skipped"] = 0
         return []
 
 def get_video_duration(video_path: str) -> float:
@@ -394,7 +405,8 @@ def get_video_duration(video_path: str) -> float:
         ], capture_output=True, text=True, timeout=10)
         return float(result.stdout.strip())
     except:
-        return 30.0
+        # Unknown duration should not force far seek points.
+        return 0.0
 
 # ── Thumbnail Generation ──────────────────────────────────
 def generate_thumbnail(video_path: str) -> Optional[str]:
@@ -430,9 +442,15 @@ def can_extract_picker_frames(video_path: str) -> bool:
     """Quick ffmpeg frame extraction gate for picker eligibility."""
     duration = get_video_duration(video_path)
     if duration > 0:
-        test_points = [max(0.1, duration * 0.25), max(0.5, duration * 0.75)]
+        # Mirror extraction spread more closely and avoid over-seeking on short clips.
+        test_points = [
+            max(0.1, duration * 0.15),
+            max(0.5, duration * 0.35),
+            max(1.0, duration * 0.65),
+            max(1.5, duration * 0.85),
+        ]
     else:
-        test_points = [0.5, 1.5]
+        test_points = [0.1, 0.5, 1.0, 2.0]
 
     for seek_time in test_points:
         try:
@@ -444,12 +462,12 @@ def can_extract_picker_frames(video_path: str) -> bool:
                 "-f", "null",
                 "-"
             ], capture_output=True, timeout=12, check=False)
-            if result.returncode != 0:
-                return False
+            if result.returncode == 0:
+                return True
         except:
-            return False
+            pass
 
-    return True
+    return False
 
 def get_thumb_b64(video_path: str) -> str:
     thumb_path = generate_thumbnail(video_path)
@@ -1485,7 +1503,11 @@ def main():
     videos = load_videos()
     if not videos:
         toast("No videos found!")
-        print(f"No MP4 files in {SCOOPZ_DIR}")
+        if LAST_DISCOVERY["existing"] > 0:
+            print(f"Found {LAST_DISCOVERY['existing']} MP4 files in {SCOOPZ_DIR}, but 0 eligible for picker.")
+            print("Reason: thumbnail/frame extraction filter rejected all videos on this device.")
+        else:
+            print(f"No MP4 files in {SCOOPZ_DIR}")
         sys.exit(1)
     
     print(f"📼 Found {len(videos)} videos")
