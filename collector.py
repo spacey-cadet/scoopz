@@ -172,6 +172,7 @@ class ScoopzHybrid:
 
         def _looks_valid_mp4(path: Path) -> tuple[bool, str]:
             ffprobe_ok = None
+            ffprobe_err = False
             try:
                 if not path.exists():
                     return False, "missing temp file"
@@ -197,7 +198,7 @@ class ScoopzHybrid:
                     check=False,
                 )
                 if r.returncode != 0:
-                    return False, "ffprobe rejected file"
+                    ffprobe_err = True
                 dur_s = (r.stdout or "").strip()
                 try:
                     dur = float(dur_s)
@@ -208,7 +209,7 @@ class ScoopzHybrid:
                 # ffprobe not installed; best-effort fallback already checked size.
                 pass
             except Exception:
-                return False, "ffprobe error"
+                ffprobe_err = True
 
             # If ffprobe ran, require a reasonable positive duration.
             if ffprobe_ok is False:
@@ -241,7 +242,13 @@ class ScoopzHybrid:
                     check=False,
                 )
                 if r.returncode != 0:
+                    if ffprobe_err:
+                        return False, "ffprobe rejected and ffmpeg decode failed"
                     return False, "ffmpeg decode check failed"
+
+                # ffmpeg decoded fine, so accept even if ffprobe is picky on this device/build.
+                if ffprobe_err:
+                    return True, ""
                 return True, ""
             except FileNotFoundError:
                 # ffmpeg not installed: fall back to size-only.
@@ -254,8 +261,21 @@ class ScoopzHybrid:
         # Retry loop for the actual video file
         for attempt in range(retries):
             try:
-                with self.session.get(play_url, stream=True, timeout=30) as r:
+                with self.session.get(
+                    play_url,
+                    stream=True,
+                    timeout=30,
+                    headers={
+                        "Referer": "https://www.tiktok.com/",
+                        "Accept": "video/*,*/*;q=0.8",
+                    },
+                ) as r:
                     r.raise_for_status()
+
+                    ctype = (r.headers.get("Content-Type") or "").lower()
+                    if ctype and ("text/html" in ctype or "application/json" in ctype):
+                        return False, f"cdn non-video content-type: {ctype}"
+
                     with open(temp_path, "wb") as f:
                         shutil.copyfileobj(r.raw, f)
 
