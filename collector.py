@@ -23,33 +23,29 @@ POLL_RATE   = 0.5
 TIKWM_API   = "https://www.tikwm.com/api/"
 TIKTOK_RE   = re.compile(r"https?://(?:(?:www|vt|vm)\.)?tiktok\.com/\S+", re.I)
 
-# Reject tiny/partial files and retry instead of saving unreadable mp4s.
-# You can override this if needed: SCOOPZ_MIN_BYTES=0
-MIN_BYTES = int(os.environ.get("SCOOPZ_MIN_BYTES", "250000"))
-
-# Download retries (per video). Lower = faster, higher = more resilient.
+# Validation settings
+MIN_BYTES = int(os.environ.get("SCOOPZ_MIN_BYTES", "100000"))  # Lowered to 100KB (was 250KB)
 DOWNLOAD_RETRIES = int(os.environ.get("SCOOPZ_DOWNLOAD_RETRIES", "2"))
 
-# Extra safety: always reject videos that cannot yield a thumbnail frame.
-VALIDATE_THUMBNAIL = True
+# CRITICAL FIX: Make thumbnail validation optional (it's too strict)
+VALIDATE_THUMBNAIL = os.environ.get("SCOOPZ_VALIDATE_THUMBNAIL", "0") == "1"
 
-# Keep the terminal quiet during normal runs.
 VERBOSE_EVENT_LOGS = os.environ.get("SCOOPZ_VERBOSE", "0") == "1"
+
 
 class ScoopzHybrid:
     def __init__(self):
         self.queue = asyncio.Queue()
         self.session = requests.Session()
-        # Disguise the script slightly to prevent API blocking
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
         })
         self.downloaded = 0
         self.skipped = 0
         self.failed = 0
         self.active = 0
         self.history = set(HISTORY_FILE.read_text().splitlines())
-
+    
     def log_fail(self, reason: str):
         if VERBOSE_EVENT_LOGS:
             print(f"\n[fail] {reason}", flush=True)
@@ -57,31 +53,38 @@ class ScoopzHybrid:
     def update_ui(self):
         queued = self.queue.qsize()
         sys.stdout.write(
-            f"\r\033[K ⬇️  Active: {self.active} | ✅ Downloaded: {self.downloaded} | ⏭️ Skipped: {self.skipped} | ❌ Fail: {self.failed} | 🕒 Queued: {queued}"
+            f"\r\033[K ⬇️  Active: {self.active} | "
+            f"✅ Downloaded: {self.downloaded} | "
+            f"⏭️ Skipped: {self.skipped} | "
+            f"❌ Fail: {self.failed} | "
+            f"🕒 Queued: {queued}"
         )
         sys.stdout.flush()
     
     def send_notification(self, title, msg):
-        subprocess.run([
-            "termux-notification", 
-            "-t", title, 
-            "-c", msg, 
-            "--id", "scoopz_notif",
-            "--priority", "low"
-        ], capture_output=True)
+        try:
+            subprocess.run([
+                "termux-notification", 
+                "-t", title, 
+                "-c", msg, 
+                "--id", "scoopz_notif",
+                "--priority", "low"
+            ], capture_output=True, timeout=3, check=False)
+        except:
+            pass
     
     def add_to_history(self, video_id):
         self.history.add(video_id)
         with open(HISTORY_FILE, "a") as f:
             f.write(f"{video_id}\n")
-
+    
     def _safe_slug(self, text: str, max_len: int = 48) -> str:
         text = (text or "").strip().lower()
         text = re.sub(r"\s+", "_", text)
         text = re.sub(r"[^a-z0-9_\-]", "", text)
         text = re.sub(r"_+", "_", text).strip("_")
         return text[:max_len]
-
+    
     def _build_video_basename(self, clip: dict, video_id: str) -> str:
         """Create readable but stable filename with id suffix for uniqueness."""
         author = ""
@@ -95,25 +98,25 @@ class ScoopzHybrid:
             )
         elif isinstance(raw_author, str):
             author = raw_author
-
+        
         title = (
             clip.get("title")
             or clip.get("desc")
             or clip.get("region")
             or ""
         )
-
+        
         author_slug = self._safe_slug(author, max_len=20)
         title_slug = self._safe_slug(title, max_len=40)
         id_suffix = self._safe_slug(video_id, max_len=24) or "vid"
-
+        
         parts = []
         if author_slug:
             parts.append(author_slug)
         if title_slug:
             parts.append(title_slug)
         parts.append(id_suffix)
-
+        
         return "__".join(parts)
     
     async def watch_inbox(self):
@@ -127,142 +130,110 @@ class ScoopzHybrid:
                             m = TIKTOK_RE.search(line)
                             if m:
                                 found_urls.append(m.group(0).strip())
+                        
                         if found_urls:
-                            INBOX_PATH.write_text("") # Clear inbox immediately
+                            INBOX_PATH.write_text("")
                             for url in found_urls:
                                 await self.queue.put(url)
                             self.update_ui()
                 except Exception as e:
                     self.log_fail(f"inbox read: {type(e).__name__}")
+            
             await asyncio.sleep(POLL_RATE)
-
+    
     def _sync_download(self, play_url, final_path):
-        """Runs blocking requests operations safely in a thread"""
+        """Runs blocking requests operations safely in a thread."""
         temp_path = final_path.with_suffix('.mp4.part')
-        repaired_path = final_path.with_suffix('.mp4.repaired.part')
-
-        def _repair_container_for_thumbnail(src: Path, dst: Path) -> bool:
-            # Some phone/ffmpeg builds fail thumbs on fragmented mp4 containers.
-            # Fast remux often fixes seekability without re-encoding.
+        
+        def _can_decode_video(path: Path) -> tuple[bool, str]:
+            """
+            FIXED: Check if ffmpeg can decode the video.
+            This is the ONLY validation that matters for Scoopz.
+            """
             try:
-                if dst.exists():
-                    dst.unlink(missing_ok=True)
-                r = subprocess.run(
+                if not path.exists():
+                    return False, "temp file missing"
+                
+                size = path.stat().st_size
+                if size < MIN_BYTES:
+                    return False, f"file too small ({size} bytes < {MIN_BYTES})"
+                
+            except Exception as e:
+                return False, f"stat error: {type(e).__name__}"
+            
+            # Test if ffmpeg can decode at least 1 frame
+            try:
+                result = subprocess.run(
                     [
                         "ffmpeg",
                         "-nostdin",
-                        "-v",
-                        "error",
-                        "-y",
-                        "-i",
-                        str(src),
-                        "-c",
-                        "copy",
-                        "-movflags",
-                        "+faststart",
-                        str(dst),
+                        "-v", "error",
+                        "-i", str(path),
+                        "-map", "0:v:0",
+                        "-frames:v", "1",
+                        "-f", "null",
+                        "-"
                     ],
                     capture_output=True,
                     text=True,
-                    timeout=20,
-                    check=False,
+                    timeout=15,
+                    check=False
                 )
-                return r.returncode == 0 and dst.exists() and dst.stat().st_size > 0
+                
+                if result.returncode != 0:
+                    # FIXED: Return actual ffmpeg error, not generic message
+                    stderr = (result.stderr or "").strip()
+                    return False, f"decode failed: {stderr[:100] if stderr else 'unknown error'}"
+                
+                # Optional: Check thumbnail extraction (disabled by default)
+                if VALIDATE_THUMBNAIL:
+                    thumb_ok = self._can_extract_thumbnail(path)
+                    if not thumb_ok:
+                        # Don't fail - just warn
+                        print(f"\n⚠️  Warning: Thumbnail extraction failed for {path.name}", flush=True)
+                
+                return True, ""
+            
             except FileNotFoundError:
-                return False
-            except Exception:
-                return False
-
+                # ffmpeg not installed - accept file based on size only
+                return True, ""
+            except subprocess.TimeoutExpired:
+                return False, "ffmpeg timeout"
+            except Exception as e:
+                return False, f"validation error: {type(e).__name__}"
+        
         def _can_extract_thumbnail(path: Path) -> bool:
-            # Mirror picker behavior: if none of these seeks work,
-            # this file will likely show as no-thumb in the web picker.
-            seek_points = ["0.1", "0.5", "1", "2"]
-            for seek in seek_points:
+            """Test if thumbnail can be extracted (optional check)."""
+            for seek in ["1", "2", "0.5"]:
                 try:
-                    r = subprocess.run(
+                    result = subprocess.run(
                         [
                             "ffmpeg",
                             "-nostdin",
-                            "-v",
-                            "error",
-                            "-ss",
-                            seek,
-                            "-i",
-                            str(path),
-                            "-vframes",
-                            "1",
-                            "-f",
-                            "null",
-                            "-",
+                            "-v", "error",
+                            "-ss", seek,
+                            "-i", str(path),
+                            "-vframes", "1",
+                            "-f", "null",
+                            "-"
                         ],
                         capture_output=True,
-                        text=True,
-                        timeout=12,
-                        check=False,
+                        timeout=10,
+                        check=False
                     )
-                    if r.returncode == 0:
+                    if result.returncode == 0:
                         return True
-                except FileNotFoundError:
-                    # If ffmpeg is missing, do not block the download here.
-                    return True
-                except Exception:
+                except:
                     pass
             return False
-
-        def _looks_valid_mp4(path: Path) -> tuple[bool, str]:
-            try:
-                if not path.exists():
-                    return False, "missing temp file"
-                if MIN_BYTES > 0 and path.stat().st_size < MIN_BYTES:
-                    return False, "file too small"
-            except Exception:
-                return False, "temp file stat failed"
-
-            thumbnail_ok = True
-            if VALIDATE_THUMBNAIL:
-                thumbnail_ok = _can_extract_thumbnail(path)
-
-            # Align with Scoopz usage: ffmpeg must be able to decode at least one frame.
-            try:
-                r = subprocess.run(
-                    [
-                        "ffmpeg",
-                        "-nostdin",
-                        "-v",
-                        "error",
-                        "-i",
-                        str(path),
-                        "-map",
-                        "0:v:0",
-                        "-frames:v",
-                        "1",
-                        "-f",
-                        "null",
-                        "-",
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=12,
-                    check=False,
-                )
-                if r.returncode != 0:
-                    return False, "ffmpeg decode check failed"
-
-                if VALIDATE_THUMBNAIL and not thumbnail_ok:
-                    # Keep the file if it decodes; thumbnail extraction is advisory here.
-                    return True, "thumbnail not extractable"
-                return True, ""
-            except FileNotFoundError:
-                # ffmpeg not installed: fall back to size-only.
-                return True, ""
-            except Exception:
-                return False, "ffmpeg validation error"
         
+        # Download with retries
         retries = max(1, DOWNLOAD_RETRIES)
-
-        # Retry loop for the actual video file
+        last_error = ""
+        
         for attempt in range(retries):
             try:
+                # Download file
                 with self.session.get(
                     play_url,
                     stream=True,
@@ -270,60 +241,63 @@ class ScoopzHybrid:
                     headers={
                         "Referer": "https://www.tiktok.com/",
                         "Accept": "video/*,*/*;q=0.8",
-                    },
+                    }
                 ) as r:
                     r.raise_for_status()
-
+                    
+                    # Check content type
                     ctype = (r.headers.get("Content-Type") or "").lower()
-                    if ctype and ("text/html" in ctype or "application/json" in ctype):
-                        return False, f"cdn non-video content-type: {ctype}"
-
-                    with open(temp_path, "wb") as f:
-                        shutil.copyfileobj(r.raw, f)
-
-                # Validate before saving into the gallery folder.
-                is_valid, reason = _looks_valid_mp4(temp_path)
-                if not is_valid:
-                    # One repair pass before giving up: helps with container quirks across devices.
-                    if reason == "no extractable thumbnail" and _repair_container_for_thumbnail(temp_path, repaired_path):
-                        is_valid, reason = _looks_valid_mp4(repaired_path)
-                        if is_valid:
-                            try:
-                                temp_path.unlink(missing_ok=True)
-                            except Exception:
-                                pass
-                            repaired_path.rename(temp_path)
-
-                    if not is_valid:
-                        try:
-                            temp_path.unlink(missing_ok=True)
-                            repaired_path.unlink(missing_ok=True)
-                        except Exception:
-                            pass
+                    if "text/html" in ctype or "application/json" in ctype:
+                        last_error = f"invalid content-type: {ctype}"
                         if attempt < retries - 1:
                             time.sleep(2)
-                        continue
-
-                    try:
-                        repaired_path.unlink(missing_ok=True)
-                    except Exception:
-                        pass
+                            continue
+                        return False, last_error
+                    
+                    # Download to temp file
+                    with open(temp_path, "wb") as f:
+                        shutil.copyfileobj(r.raw, f)
                 
-                # Success! Rename to final mp4
+                # Validate downloaded file
+                is_valid, reason = _can_decode_video(temp_path)
+                
+                if not is_valid:
+                    last_error = reason
+                    
+                    # Clean up bad file
+                    try:
+                        temp_path.unlink()
+                    except:
+                        pass
+                    
+                    # Retry on validation failure
+                    if attempt < retries - 1:
+                        time.sleep(2)
+                        continue
+                    
+                    return False, last_error
+                
+                # Success - rename to final path
                 temp_path.rename(final_path)
                 return True, ""
-                
+            
             except Exception as e:
-                # Clean up corrupted partial file if it failed
-                if temp_path.exists():
-                    temp_path.unlink()
-                if repaired_path.exists():
-                    repaired_path.unlink()
+                last_error = f"{type(e).__name__}: {str(e)[:100]}"
                 
+                # Clean up partial file
+                try:
+                    if temp_path.exists():
+                        temp_path.unlink()
+                except:
+                    pass
+                
+                # Retry on exception
                 if attempt < retries - 1:
-                    time.sleep(2) # Wait before retry
-        return False, reason if 'reason' in locals() and reason else f"download error: {type(e).__name__}" if 'e' in locals() else "download failed"
-
+                    time.sleep(2)
+                    continue
+        
+        return False, last_error
+    
     async def download_worker(self):
         while True:
             url = await self.queue.get()
@@ -333,10 +307,10 @@ class ScoopzHybrid:
             try:
                 data = None
                 last_api_err = ""
-                # API Retry Loop
+                
+                # API retry loop
                 for attempt in range(3):
                     try:
-                        # TikWM sometimes prefers POST data over GET params
                         resp = await asyncio.to_thread(
                             self.session.post, 
                             TIKWM_API, 
@@ -345,53 +319,76 @@ class ScoopzHybrid:
                         )
                         resp.raise_for_status()
                         data = resp.json()
+                        
                         if data.get("code") == 0:
                             break
+                        
                         last_api_err = f"api code {data.get('code')}: {data.get('msg', 'no message')}"
+                        
                         if data.get("code") == -1:
                             await asyncio.sleep(2)
+                    
                     except Exception as e:
                         last_api_err = f"api request: {type(e).__name__}"
                         await asyncio.sleep(2)
                 
                 if not data or data.get("code") != 0:
                     self.failed += 1
-                    self.log_fail(last_api_err or "api returned no usable data")
+                    self.log_fail(last_api_err or "api returned no data")
                     continue
                 
                 clip = data.get("data", {})
                 video_id = clip.get("id", "unknown")
                 
-                # Check history early to save bandwidth
+                # Check history
                 if video_id in self.history:
                     self.skipped += 1
                     continue
                 
-                # Prioritize HD, fallback to standard, fail gracefully if it's a photo post
+                # Get video URL
                 play_url = clip.get("hdplay") or clip.get("play")
                 if not play_url:
-                    self.failed += 1 # Likely an image carousel, not a video
+                    self.failed += 1
                     self.log_fail(f"no play url (id={video_id})")
                     continue
                 
+                # Build filename
                 file_base = self._build_video_basename(clip, video_id)
                 final_path = EXPORT_DIR / f"{file_base}.mp4"
                 
-                # Offload the heavy file downloading to a background thread
-                success, reason = await asyncio.to_thread(self._sync_download, play_url, final_path)
+                # Download
+                success, reason = await asyncio.to_thread(
+                    self._sync_download, 
+                    play_url, 
+                    final_path
+                )
                 
                 if success:
-                    subprocess.run(["termux-media-scan", str(final_path)], capture_output=True)
+                    # Add to media library
+                    try:
+                        subprocess.run(
+                            ["termux-media-scan", str(final_path)], 
+                            capture_output=True,
+                            timeout=5,
+                            check=False
+                        )
+                    except:
+                        pass
+                    
                     self.add_to_history(video_id)
                     self.downloaded += 1
-                    self.send_notification("Scoopz Downloaded", f"Saved {video_id} to Gallery")
+                    self.send_notification(
+                        "Scoopz Downloaded", 
+                        f"Saved {final_path.name[:40]}"
+                    )
                 else:
                     self.failed += 1
                     self.log_fail(f"{video_id}: {reason}")
-
+            
             except Exception as e:
                 self.failed += 1
-                self.log_fail(f"worker crash: {type(e).__name__}")
+                self.log_fail(f"worker crash: {type(e).__name__}: {str(e)[:100]}")
+            
             finally:
                 self.active -= 1
                 self.queue.task_done()
@@ -400,9 +397,15 @@ class ScoopzHybrid:
     async def run(self):
         self.send_notification("Scoopz Active", "Watching for TikTok links...")
         print("📋 Starting collector — browse TikTok and Share → Copy Link\n")
-        workers = [asyncio.create_task(self.download_worker()) for _ in range(MAX_WORKERS)]
+        
+        workers = [
+            asyncio.create_task(self.download_worker()) 
+            for _ in range(MAX_WORKERS)
+        ]
         watcher = asyncio.create_task(self.watch_inbox())
+        
         await asyncio.gather(watcher, *workers)
+
 
 if __name__ == "__main__":
     try:
