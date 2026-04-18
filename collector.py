@@ -47,6 +47,10 @@ class ScoopzHybrid:
         self.failed = 0
         self.active = 0
         self.history = set(HISTORY_FILE.read_text().splitlines())
+
+    def log_fail(self, reason: str):
+        # Keep these logs short so they stay readable on mobile terminals.
+        print(f"\n[fail] {reason}", flush=True)
     
     def update_ui(self):
         queued = self.queue.qsize()
@@ -122,8 +126,8 @@ class ScoopzHybrid:
                             for url in found_urls:
                                 await self.queue.put(url)
                             self.update_ui()
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.log_fail(f"inbox read: {type(e).__name__}")
             await asyncio.sleep(POLL_RATE)
 
     def _sync_download(self, play_url, final_path):
@@ -166,15 +170,15 @@ class ScoopzHybrid:
                     pass
             return False
 
-        def _looks_valid_mp4(path: Path) -> bool:
+        def _looks_valid_mp4(path: Path) -> tuple[bool, str]:
             ffprobe_ok = None
             try:
                 if not path.exists():
-                    return False
+                    return False, "missing temp file"
                 if MIN_BYTES > 0 and path.stat().st_size < MIN_BYTES:
-                    return False
+                    return False, "file too small"
             except Exception:
-                return False
+                return False, "temp file stat failed"
 
             # Prefer ffprobe if available (fast + accurate).
             try:
@@ -193,7 +197,7 @@ class ScoopzHybrid:
                     check=False,
                 )
                 if r.returncode != 0:
-                    return False
+                    return False, "ffprobe rejected file"
                 dur_s = (r.stdout or "").strip()
                 try:
                     dur = float(dur_s)
@@ -204,14 +208,14 @@ class ScoopzHybrid:
                 # ffprobe not installed; best-effort fallback already checked size.
                 pass
             except Exception:
-                return False
+                return False, "ffprobe error"
 
             # If ffprobe ran, require a reasonable positive duration.
             if ffprobe_ok is False:
-                return False
+                return False, "duration too short"
 
             if VALIDATE_THUMBNAIL and not _can_extract_thumbnail(path):
-                return False
+                return False, "no extractable thumbnail"
 
             # Align with Scoopz usage: ffmpeg must be able to decode at least one frame.
             try:
@@ -236,12 +240,14 @@ class ScoopzHybrid:
                     timeout=12,
                     check=False,
                 )
-                return r.returncode == 0
+                if r.returncode != 0:
+                    return False, "ffmpeg decode check failed"
+                return True, ""
             except FileNotFoundError:
                 # ffmpeg not installed: fall back to size-only.
-                return True
+                return True, ""
             except Exception:
-                return False
+                return False, "ffmpeg validation error"
         
         retries = max(1, DOWNLOAD_RETRIES)
 
@@ -254,7 +260,8 @@ class ScoopzHybrid:
                         shutil.copyfileobj(r.raw, f)
 
                 # Validate before saving into the gallery folder.
-                if not _looks_valid_mp4(temp_path):
+                is_valid, reason = _looks_valid_mp4(temp_path)
+                if not is_valid:
                     try:
                         temp_path.unlink(missing_ok=True)
                     except Exception:
@@ -265,16 +272,16 @@ class ScoopzHybrid:
                 
                 # Success! Rename to final mp4
                 temp_path.rename(final_path)
-                return True
+                return True, ""
                 
-            except Exception:
+            except Exception as e:
                 # Clean up corrupted partial file if it failed
                 if temp_path.exists():
                     temp_path.unlink()
                 
                 if attempt < retries - 1:
                     time.sleep(2) # Wait before retry
-        return False
+        return False, reason if 'reason' in locals() and reason else f"download error: {type(e).__name__}" if 'e' in locals() else "download failed"
 
     async def download_worker(self):
         while True:
@@ -284,6 +291,7 @@ class ScoopzHybrid:
             
             try:
                 data = None
+                last_api_err = ""
                 # API Retry Loop
                 for attempt in range(3):
                     try:
@@ -294,16 +302,20 @@ class ScoopzHybrid:
                             data={"url": url, "hd": 1}, 
                             timeout=15
                         )
+                        resp.raise_for_status()
                         data = resp.json()
                         if data.get("code") == 0:
                             break
+                        last_api_err = f"api code {data.get('code')}: {data.get('msg', 'no message')}"
                         if data.get("code") == -1:
                             await asyncio.sleep(2)
-                    except Exception:
+                    except Exception as e:
+                        last_api_err = f"api request: {type(e).__name__}"
                         await asyncio.sleep(2)
                 
                 if not data or data.get("code") != 0:
                     self.failed += 1
+                    self.log_fail(last_api_err or "api returned no usable data")
                     continue
                 
                 clip = data.get("data", {})
@@ -318,13 +330,14 @@ class ScoopzHybrid:
                 play_url = clip.get("hdplay") or clip.get("play")
                 if not play_url:
                     self.failed += 1 # Likely an image carousel, not a video
+                    self.log_fail(f"no play url (id={video_id})")
                     continue
                 
                 file_base = self._build_video_basename(clip, video_id)
                 final_path = EXPORT_DIR / f"{file_base}.mp4"
                 
                 # Offload the heavy file downloading to a background thread
-                success = await asyncio.to_thread(self._sync_download, play_url, final_path)
+                success, reason = await asyncio.to_thread(self._sync_download, play_url, final_path)
                 
                 if success:
                     subprocess.run(["termux-media-scan", str(final_path)], capture_output=True)
@@ -333,9 +346,11 @@ class ScoopzHybrid:
                     self.send_notification("Scoopz Downloaded", f"Saved {video_id} to Gallery")
                 else:
                     self.failed += 1
+                    self.log_fail(f"{video_id}: {reason}")
 
-            except Exception:
+            except Exception as e:
                 self.failed += 1
+                self.log_fail(f"worker crash: {type(e).__name__}")
             finally:
                 self.active -= 1
                 self.queue.task_done()
