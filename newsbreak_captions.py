@@ -538,11 +538,11 @@ MODE RULES:
 - outrage_opinion: prioritize hot take, judgment, accountability, or "pick a side" framing.
 
 HASHTAGS:
-- 4-5 tags total (all lowercase)
-- Balanced mix is REQUIRED:
-    - 2-3 video-specific tags (names/actions/topics/events tied to this content)
-    - 2-3 general viral tags (reaction/curiosity/social-energy/relatable)
-- At least one hashtag must reflect emotion/reaction
+- max 7 tags total (all lowercase)
+- Required mix per caption:
+    - mandatory general tags: #scoopz #funny #foryou #trending
+    - 2 reaction tags (emotion/curiosity/social-energy)
+    - 1 video-specific tag (names/actions/topics/events tied to this content)
 - No platform tags (no #tiktok, #instagram, etc.)
 - Avoid dead-generic tags unless paired with strong tags
 - Avoid repeating the exact same tag mix across outputs
@@ -581,6 +581,8 @@ GENERAL_VIRAL_POOL = [
     "cantlookaway",
     "messy",
 ]
+
+MANDATORY_GENERAL_TAGS = ["scoopz", "funny", "foryou", "trending"]
 
 REACTION_TAGS = {
     "wtfmoment",
@@ -670,7 +672,7 @@ def _looks_like_breaking_story(caption: str, transcript: str) -> bool:
 
 
 def normalize_hashtags(hashtags_text: str, caption: str, transcript: str) -> str:
-    """Enforce balanced hashtag strategy (2-3 specific + 2-3 viral, total 4-5)."""
+    """Enforce strict mix: 4 mandatory general + 2 reaction + 1 video-specific (max 7)."""
     extracted = _extract_hashtags(hashtags_text)
 
     typo_map = {
@@ -686,14 +688,14 @@ def normalize_hashtags(hashtags_text: str, caption: str, transcript: str) -> str
             normalized.append(tag)
 
     video_specific = [t for t in normalized if not _is_general_viral_tag(t)]
-    general_viral = [t for t in normalized if _is_general_viral_tag(t)]
+    reaction_tags = [t for t in normalized if t in REACTION_TAGS]
 
-    if len(video_specific) < 2:
+    if len(video_specific) < 1:
         derived = _derive_video_specific_tags(caption, transcript)
         for t in derived:
-            if t not in video_specific and t not in general_viral:
+            if t not in video_specific and t not in reaction_tags:
                 video_specific.append(t)
-            if len(video_specific) >= 3:
+            if len(video_specific) >= 1:
                 break
 
     # Deterministic rotation to avoid repeating exact same viral set.
@@ -704,36 +706,39 @@ def normalize_hashtags(hashtags_text: str, caption: str, transcript: str) -> str
         pool = pool[shift:] + pool[:shift]
 
     for t in pool:
-        if t not in general_viral and t not in video_specific:
-            general_viral.append(t)
-        if len(general_viral) >= 3:
+        if t in REACTION_TAGS and t not in reaction_tags and t not in video_specific:
+            reaction_tags.append(t)
+        if len(reaction_tags) >= 2:
             break
 
-    if not any(t in REACTION_TAGS for t in general_viral):
-        for t in pool:
-            if t in REACTION_TAGS and t not in general_viral and t not in video_specific:
-                general_viral.insert(0, t)
-                break
-
     if _looks_like_breaking_story(caption, transcript) and "breakingnews" not in video_specific:
-        if len(video_specific) < 3:
+        if len(video_specific) < 1:
             video_specific.append("breakingnews")
 
-    # Tight balanced mix: target 5, minimum 4.
-    final_tags = video_specific[:3] + general_viral[:3]
+    # Build exact recipe: 4 mandatory general + 2 reaction + 1 video-specific.
+    final_tags = MANDATORY_GENERAL_TAGS[:] + reaction_tags[:2] + video_specific[:1]
+
     deduped: List[str] = []
     for t in final_tags:
-        if t and t not in deduped:
+        if t and t not in deduped and t not in PLATFORM_TAGS:
             deduped.append(t)
 
-    if len(deduped) > 5:
-        deduped = deduped[:5]
-    if len(deduped) < 4:
+    # Fill any missing reaction slots if dedupe removed entries.
+    if len([t for t in deduped if t in REACTION_TAGS]) < 2:
         for t in pool:
-            if t not in deduped:
+            if t in REACTION_TAGS and t not in deduped:
                 deduped.append(t)
-            if len(deduped) >= 4:
+            if len([x for x in deduped if x in REACTION_TAGS]) >= 2:
                 break
+
+    # Ensure at least one video-specific tag exists.
+    if not any(not _is_general_viral_tag(t) and t not in MANDATORY_GENERAL_TAGS for t in deduped):
+        fallback_specific = video_specific[0] if video_specific else "localnews"
+        if fallback_specific not in deduped and fallback_specific not in PLATFORM_TAGS:
+            deduped.append(fallback_specific)
+
+    # Hard cap requested.
+    deduped = deduped[:7]
 
     return " ".join(f"#{t}" for t in deduped)
 
