@@ -45,6 +45,9 @@ NUM_FRAMES         = 4  # Extract 4 frames per video
 PORT               = 8765
 EXTRACT_AUDIO      = True
 REQUIRE_VALID_THUMBNAIL = True  # Hide videos that cannot produce a thumbnail.
+THUMB_MAX_FILES = int(os.environ.get("SCOOPZ_THUMB_MAX_FILES", "500"))
+THUMB_MAX_MB = int(os.environ.get("SCOOPZ_THUMB_MAX_MB", "120"))
+THUMB_MAX_AGE_DAYS = int(os.environ.get("SCOOPZ_THUMB_MAX_AGE_DAYS", "30"))
 
 # Weighting: by default, prioritize spoken audio over visuals.
 AUDIO_WEIGHT = float(os.environ.get("SCOOPZ_AUDIO_WEIGHT", "0.65"))
@@ -303,6 +306,54 @@ def next_pov_mode() -> str:
     return modes[0] if modes else "THIRD PERSON"
 
 # ── Video Discovery ───────────────────────────────────────
+def prune_thumbnail_cache(existing_videos: List[str]):
+    """Prune thumbnail cache by source existence, age, count, and total size."""
+    try:
+        os.makedirs(THUMB_DIR, exist_ok=True)
+        now = time.time()
+        keep_names = {os.path.basename(v) + ".jpg" for v in existing_videos}
+
+        entries = []
+        for name in os.listdir(THUMB_DIR):
+            path = os.path.join(THUMB_DIR, name)
+            if os.path.isfile(path):
+                entries.append(path)
+
+        max_age_sec = max(0, THUMB_MAX_AGE_DAYS) * 86400
+        for path in list(entries):
+            try:
+                name = os.path.basename(path)
+                too_old = max_age_sec > 0 and (now - os.path.getmtime(path)) > max_age_sec
+                if (name not in keep_names) or too_old:
+                    os.remove(path)
+            except:
+                pass
+
+        entries = [
+            os.path.join(THUMB_DIR, name)
+            for name in os.listdir(THUMB_DIR)
+            if os.path.isfile(os.path.join(THUMB_DIR, name))
+        ]
+
+        entries.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+        max_bytes = max(1, THUMB_MAX_MB) * 1024 * 1024
+        total = 0
+        for idx, path in enumerate(entries):
+            try:
+                size = os.path.getsize(path)
+            except:
+                continue
+
+            if idx >= max(1, THUMB_MAX_FILES) or (total + size) > max_bytes:
+                try:
+                    os.remove(path)
+                except:
+                    pass
+            else:
+                total += size
+    except:
+        pass
+
 def load_videos() -> List[str]:
     try:
         files = [
@@ -312,6 +363,7 @@ def load_videos() -> List[str]:
         ]
         existing = [f for f in files if os.path.exists(f)]
         existing.sort(key=lambda x: os.path.getmtime(x), reverse=True)
+        prune_thumbnail_cache(existing)
 
         if not REQUIRE_VALID_THUMBNAIL:
             return existing

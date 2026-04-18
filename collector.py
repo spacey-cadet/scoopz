@@ -22,6 +22,7 @@ import requests
 
 INBOX_PATH   = Path("/sdcard/Download/links_inbox.txt")
 EXPORT_DIR   = Path("/sdcard/Pictures/scoopz")
+THUMB_DIR    = Path("/sdcard/Pictures/scoopz/.thumbs")
 HISTORY_FILE = Path("/sdcard/Download/scoopz_history.log")
 LOG_FILE     = Path("/sdcard/Download/scoopz_errors.log")
 
@@ -51,8 +52,33 @@ RETRY_BACKOFF = 2.0  # Exponential backoff multiplier
 # Feature flags
 REQUIRE_THUMBNAIL = True      # Must be able to extract thumbnail
 REQUIRE_FRAME_EXTRACTION = True  # Must be able to extract frames for AI
+# When false, thumbnail extraction failure is advisory and won't reject download.
+STRICT_THUMBNAIL_VALIDATION = os.environ.get("SCOOPZ_STRICT_THUMB_VALIDATION", "0") == "1"
 VERBOSE_LOGGING = os.environ.get("SCOOPZ_VERBOSE", "0") == "1"
 USE_ANSI_STATUS = sys.stdout.isatty() and os.environ.get("TERM", "") != "dumb"
+
+# Thumbnail cache controls (to avoid storage bloat)
+THUMB_MAX_FILES = int(os.environ.get("SCOOPZ_THUMB_MAX_FILES", "500"))
+THUMB_MAX_MB = int(os.environ.get("SCOOPZ_THUMB_MAX_MB", "120"))
+THUMB_MAX_AGE_DAYS = int(os.environ.get("SCOOPZ_THUMB_MAX_AGE_DAYS", "30"))
+THUMB_PRUNE_INTERVAL_SEC = int(os.environ.get("SCOOPZ_THUMB_PRUNE_INTERVAL_SEC", "300"))
+
+# Multi-phone behavior:
+# - SCOOPZ_TRANSCODE_MODE=auto (default): learn if this phone needs transcode
+# - SCOOPZ_TRANSCODE_MODE=on: always transcode
+# - SCOOPZ_TRANSCODE_MODE=off: never transcode
+# Legacy support: SCOOPZ_FORCE_TRANSCODE=1/0
+_legacy_force_transcode = os.environ.get("SCOOPZ_FORCE_TRANSCODE")
+_mode_raw = os.environ.get("SCOOPZ_TRANSCODE_MODE")
+if _mode_raw:
+    TRANSCODE_MODE = _mode_raw.strip().lower()
+elif _legacy_force_transcode is not None:
+    TRANSCODE_MODE = "on" if _legacy_force_transcode == "1" else "off"
+else:
+    TRANSCODE_MODE = "auto"
+
+if TRANSCODE_MODE not in {"auto", "on", "off"}:
+    TRANSCODE_MODE = "auto"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Data Structures
@@ -67,6 +93,7 @@ class VideoMetadata:
     duration: float
     play_url: str
     hd_play_url: Optional[str] = None
+    thumb_url: Optional[str] = None
     
     @classmethod
     def from_api_response(cls, data: Dict) -> Optional['VideoMetadata']:
@@ -102,6 +129,7 @@ class VideoMetadata:
             # Video URLs
             play_url = data.get("play")
             hd_play_url = data.get("hdplay")
+            thumb_url = data.get("cover") or data.get("ai_dynamic_cover") or data.get("origin_cover")
             
             if not play_url:
                 return None
@@ -112,7 +140,8 @@ class VideoMetadata:
                 title=title,
                 duration=duration,
                 play_url=play_url,
-                hd_play_url=hd_play_url
+                hd_play_url=hd_play_url,
+                thumb_url=thumb_url
             )
         except Exception:
             return None
@@ -208,7 +237,7 @@ class VideoValidator:
         
         # Stage 4: Thumbnail extraction test (for picker UI)
         can_thumbnail = VideoValidator._can_extract_thumbnail(video_path)
-        if REQUIRE_THUMBNAIL and not can_thumbnail:
+        if REQUIRE_THUMBNAIL and STRICT_THUMBNAIL_VALIDATION and not can_thumbnail:
             return ValidationResult(
                 valid=False,
                 reason="Cannot extract thumbnail (file will appear as no-thumb in picker)",
@@ -420,6 +449,13 @@ class VideoDownloader:
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.8"
         })
+        self.transcode_mode = TRANSCODE_MODE
+        self._transcode_needed: Optional[bool] = None
+
+    @staticmethod
+    def _is_compatibility_issue(reason: str) -> bool:
+        text = (reason or "").lower()
+        return ("thumbnail" in text) or ("frame" in text) or ("decode" in text)
     
     def download(self, metadata: VideoMetadata, output_path: Path) -> Tuple[bool, str]:
         """
@@ -432,6 +468,7 @@ class VideoDownloader:
         url = metadata.hd_play_url or metadata.play_url
         
         temp_path = output_path.with_suffix('.mp4.part')
+        fixed_path = output_path.with_suffix('.mp4.fixed.part')
         
         # Clean up any stale temp files
         try:
@@ -451,8 +488,78 @@ class VideoDownloader:
                         time.sleep(RETRY_BACKOFF ** attempt)
                         continue
                     return False, reason
-                
-                # Validate downloaded file
+
+                # Decide strategy for this phone/runtime.
+                if self.transcode_mode == "on":
+                    if not self._normalize_video_for_picker(temp_path, fixed_path):
+                        try:
+                            temp_path.unlink(missing_ok=True)
+                            fixed_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        return False, "Validation failed: normalize/transcode failed"
+                    try:
+                        temp_path.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    fixed_path.rename(temp_path)
+
+                elif self.transcode_mode == "auto":
+                    if self._transcode_needed is True:
+                        if not self._normalize_video_for_picker(temp_path, fixed_path):
+                            try:
+                                temp_path.unlink(missing_ok=True)
+                                fixed_path.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                            return False, "Validation failed: normalize/transcode failed"
+                        try:
+                            temp_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        fixed_path.rename(temp_path)
+                    elif self._transcode_needed is None:
+                        probe_validation = VideoValidator.validate_file(
+                            temp_path,
+                            expected_duration=metadata.duration
+                        )
+                        if probe_validation.valid:
+                            self._transcode_needed = False
+                        elif self._is_compatibility_issue(probe_validation.reason):
+                            if self._normalize_video_for_picker(temp_path, fixed_path):
+                                repaired_validation = VideoValidator.validate_file(
+                                    fixed_path,
+                                    expected_duration=metadata.duration
+                                )
+                                if repaired_validation.valid:
+                                    self._transcode_needed = True
+                                    try:
+                                        temp_path.unlink(missing_ok=True)
+                                    except Exception:
+                                        pass
+                                    fixed_path.rename(temp_path)
+                                else:
+                                    try:
+                                        temp_path.unlink(missing_ok=True)
+                                        fixed_path.unlink(missing_ok=True)
+                                    except Exception:
+                                        pass
+                                    return False, f"Validation failed after normalize: {repaired_validation.reason}"
+                            else:
+                                try:
+                                    temp_path.unlink(missing_ok=True)
+                                    fixed_path.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+                                return False, "Validation failed: normalize/transcode failed"
+                        else:
+                            # Non-compatibility failure; no point in transcoding this file.
+                            try:
+                                temp_path.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                            return False, f"Validation failed: {probe_validation.reason}"
+
                 validation = VideoValidator.validate_file(
                     temp_path,
                     expected_duration=metadata.duration
@@ -462,8 +569,13 @@ class VideoDownloader:
                     # Clean up invalid file
                     try:
                         temp_path.unlink()
+                        fixed_path.unlink(missing_ok=True)
                     except:
                         pass
+
+                    # Non-compatibility validation failures are unlikely to improve via redownload.
+                    if attempt == 0:
+                        return False, f"Validation failed: {validation.reason}"
                     
                     if attempt < DOWNLOAD_RETRIES - 1:
                         time.sleep(RETRY_BACKOFF ** attempt)
@@ -480,6 +592,8 @@ class VideoDownloader:
                 try:
                     if temp_path.exists():
                         temp_path.unlink()
+                    if fixed_path.exists():
+                        fixed_path.unlink()
                 except:
                     pass
                 
@@ -519,6 +633,47 @@ class VideoDownloader:
             return False, f"HTTP {e.response.status_code}"
         except Exception as e:
             return False, f"{type(e).__name__}"
+
+    def _normalize_video_for_picker(self, src_path: Path, dst_path: Path) -> bool:
+        """Re-encode to a picker-friendly MP4 profile for cross-device decoding."""
+        try:
+            if dst_path.exists():
+                dst_path.unlink()
+        except Exception:
+            pass
+
+        try:
+            result = subprocess.run([
+                "ffmpeg",
+                "-nostdin",
+                "-v", "error",
+                "-y",
+                "-i", str(src_path),
+                "-map", "0:v:0",
+                "-map", "0:a?",
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "24",
+                "-pix_fmt", "yuv420p",
+                "-movflags", "+faststart",
+                "-c:a", "aac",
+                "-b:a", "128k",
+                str(dst_path),
+            ],
+                capture_output=True,
+                timeout=120,
+                check=False
+            )
+
+            return (
+                result.returncode == 0
+                and dst_path.exists()
+                and dst_path.stat().st_size >= MIN_FILE_SIZE
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+        except Exception:
+            return False
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TikWM API Client
@@ -589,6 +744,7 @@ class ScoopzCollector:
         self.stats = DownloadStats()
         self.history: Set[str] = set()
         self._last_status_len = 0
+        self._last_thumb_prune_ts = 0.0
         
         # Initialize
         self._ensure_directories()
@@ -597,6 +753,7 @@ class ScoopzCollector:
     def _ensure_directories(self):
         """Create required directories."""
         EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+        THUMB_DIR.mkdir(parents=True, exist_ok=True)
         
         if not HISTORY_FILE.exists():
             HISTORY_FILE.touch()
@@ -621,6 +778,88 @@ class ScoopzCollector:
                     f.write(f"{video_id}\n")
             except:
                 pass
+
+    def _sidecar_thumb_path(self, video_path: Path) -> Path:
+        return THUMB_DIR / f"{video_path.name}.jpg"
+
+    def _fetch_sidecar_thumbnail(self, metadata: VideoMetadata, video_path: Path):
+        """Save API thumbnail as sidecar so picker does not depend on ffmpeg thumbs."""
+        thumb_url = (metadata.thumb_url or "").strip()
+        if not thumb_url:
+            return
+
+        thumb_path = self._sidecar_thumb_path(video_path)
+        try:
+            with requests.get(thumb_url, stream=True, timeout=12) as resp:
+                resp.raise_for_status()
+                ctype = (resp.headers.get("Content-Type") or "").lower()
+                if ctype and "image" not in ctype:
+                    return
+
+                tmp = thumb_path.with_suffix(".jpg.part")
+                with open(tmp, "wb") as f:
+                    shutil.copyfileobj(resp.raw, f)
+
+                if tmp.exists() and tmp.stat().st_size > 500:
+                    tmp.replace(thumb_path)
+                else:
+                    tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+    def _prune_thumb_cache(self):
+        """Keep thumbnail cache bounded by age, source existence, count, and size."""
+        try:
+            now = time.time()
+            if (now - self._last_thumb_prune_ts) < THUMB_PRUNE_INTERVAL_SEC:
+                return
+            self._last_thumb_prune_ts = now
+
+            if not THUMB_DIR.exists():
+                return
+
+            entries = [p for p in THUMB_DIR.iterdir() if p.is_file()]
+            if not entries:
+                return
+
+            # Remove orphan and too-old thumbs first.
+            max_age_sec = max(0, THUMB_MAX_AGE_DAYS) * 86400
+            for p in list(entries):
+                try:
+                    source = EXPORT_DIR / p.name.removesuffix(".jpg")
+                    too_old = max_age_sec > 0 and (now - p.stat().st_mtime) > max_age_sec
+                    if (not source.exists()) or too_old:
+                        p.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+            entries = [p for p in THUMB_DIR.iterdir() if p.is_file()]
+            if not entries:
+                return
+
+            # Then enforce max count and max total size.
+            entries.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+            max_bytes = max(1, THUMB_MAX_MB) * 1024 * 1024
+            total = 0
+            keep = []
+            for idx, p in enumerate(entries):
+                try:
+                    size = p.stat().st_size
+                except Exception:
+                    continue
+
+                over_count = idx >= max(1, THUMB_MAX_FILES)
+                over_size = (total + size) > max_bytes
+                if over_count or over_size:
+                    try:
+                        p.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                else:
+                    keep.append(p)
+                    total += size
+        except Exception:
+            pass
     
     def _log_error(self, video_id: str, reason: str):
         """Log error to file."""
@@ -778,6 +1017,10 @@ class ScoopzCollector:
                         )
                     except:
                         pass
+
+                    # Save sidecar thumbnail from API metadata when available.
+                    await asyncio.to_thread(self._fetch_sidecar_thumbnail, metadata, output_path)
+                    await asyncio.to_thread(self._prune_thumb_cache)
                     
                     # Update records
                     self._add_to_history(metadata.video_id)
@@ -810,6 +1053,8 @@ class ScoopzCollector:
         print(f"Workers: {MAX_WORKERS}")
         print(f"Min duration: {MIN_DURATION}s")
         print(f"Max duration: {MAX_DURATION}s" if MAX_DURATION > 0 else "Max duration: unlimited")
+        print(f"Transcode mode: {TRANSCODE_MODE}")
+        print(f"Strict thumbnail validation: {STRICT_THUMBNAIL_VALIDATION}")
         print(f"Require thumbnail: {REQUIRE_THUMBNAIL}")
         print(f"Require frame extraction: {REQUIRE_FRAME_EXTRACTION}")
         print("=" * 70)
