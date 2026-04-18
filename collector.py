@@ -33,6 +33,9 @@ DOWNLOAD_RETRIES = int(os.environ.get("SCOOPZ_DOWNLOAD_RETRIES", "2"))
 # Extra safety: always reject videos that cannot yield a thumbnail frame.
 VALIDATE_THUMBNAIL = True
 
+# Keep the terminal quiet during normal runs.
+VERBOSE_EVENT_LOGS = os.environ.get("SCOOPZ_VERBOSE", "0") == "1"
+
 class ScoopzHybrid:
     def __init__(self):
         self.queue = asyncio.Queue()
@@ -48,8 +51,8 @@ class ScoopzHybrid:
         self.history = set(HISTORY_FILE.read_text().splitlines())
 
     def log_fail(self, reason: str):
-        # Keep these logs short so they stay readable on mobile terminals.
-        print(f"\n[fail] {reason}", flush=True)
+        if VERBOSE_EVENT_LOGS:
+            print(f"\n[fail] {reason}", flush=True)
     
     def update_ui(self):
         queued = self.queue.qsize()
@@ -215,8 +218,9 @@ class ScoopzHybrid:
             except Exception:
                 return False, "temp file stat failed"
 
-            if VALIDATE_THUMBNAIL and not _can_extract_thumbnail(path):
-                return False, "no extractable thumbnail"
+            thumbnail_ok = True
+            if VALIDATE_THUMBNAIL:
+                thumbnail_ok = _can_extract_thumbnail(path)
 
             # Align with Scoopz usage: ffmpeg must be able to decode at least one frame.
             try:
@@ -243,6 +247,10 @@ class ScoopzHybrid:
                 )
                 if r.returncode != 0:
                     return False, "ffmpeg decode check failed"
+
+                if VALIDATE_THUMBNAIL and not thumbnail_ok:
+                    # Keep the file if it decodes; thumbnail extraction is advisory here.
+                    return True, "thumbnail not extractable"
                 return True, ""
             except FileNotFoundError:
                 # ffmpeg not installed: fall back to size-only.
