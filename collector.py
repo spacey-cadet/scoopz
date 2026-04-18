@@ -1,3 +1,8 @@
+#!/usr/bin/env python3
+"""
+Scoopz Collector v2: Production-Ready TikTok Downloader
+Validates videos for thumbnail extraction + AI caption generation workflow.
+"""
 import asyncio
 import os
 import re
@@ -5,369 +10,675 @@ import shutil
 import subprocess
 import sys
 import time
-import requests
+import json
 from pathlib import Path
+from typing import Optional, Tuple, Dict, Set
+from dataclasses import dataclass
+import requests
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# Configuration
+# ══════════════════════════════════════════════════════════════════════════════
+
 INBOX_PATH   = Path("/sdcard/Download/links_inbox.txt")
 EXPORT_DIR   = Path("/sdcard/Pictures/scoopz")
 HISTORY_FILE = Path("/sdcard/Download/scoopz_history.log")
+LOG_FILE     = Path("/sdcard/Download/scoopz_errors.log")
 
-EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-if not HISTORY_FILE.exists(): 
-    HISTORY_FILE.touch()
+# API settings
+TIKWM_API = "https://www.tikwm.com/api/"
+TIKTOK_URL_PATTERN = re.compile(
+    r"https?://(?:(?:www|vt|vm)\.)?tiktok\.com/\S+", 
+    re.IGNORECASE
+)
 
-# ── Settings ──────────────────────────────────────────────────────────────────
-MAX_WORKERS = 5            
-POLL_RATE   = 0.5          
-TIKWM_API   = "https://www.tikwm.com/api/"
-TIKTOK_RE   = re.compile(r"https?://(?:(?:www|vt|vm)\.)?tiktok\.com/\S+", re.I)
+# Performance
+MAX_WORKERS = 5
+POLL_INTERVAL = 0.5
+API_TIMEOUT = 15
+DOWNLOAD_TIMEOUT = 45
 
-# Validation settings
-MIN_BYTES = int(os.environ.get("SCOOPZ_MIN_BYTES", "100000"))  # Lowered to 100KB (was 250KB)
-DOWNLOAD_RETRIES = int(os.environ.get("SCOOPZ_DOWNLOAD_RETRIES", "2"))
+# Validation thresholds (critical for your workflow)
+MIN_FILE_SIZE = 80_000        # 80KB - reject corrupted/partial downloads
+MIN_DURATION = 1.0            # 1 second - reject too-short clips
+MAX_DURATION = 180.0          # 3 minutes - optional, set to 0 to disable
 
-# CRITICAL FIX: Make thumbnail validation optional (it's too strict)
-VALIDATE_THUMBNAIL = os.environ.get("SCOOPZ_VALIDATE_THUMBNAIL", "0") == "1"
+# Retry configuration
+DOWNLOAD_RETRIES = 3
+API_RETRIES = 3
+RETRY_BACKOFF = 2.0  # Exponential backoff multiplier
 
-VERBOSE_EVENT_LOGS = os.environ.get("SCOOPZ_VERBOSE", "0") == "1"
+# Feature flags
+REQUIRE_THUMBNAIL = True      # Must be able to extract thumbnail
+REQUIRE_FRAME_EXTRACTION = True  # Must be able to extract frames for AI
+VERBOSE_LOGGING = os.environ.get("SCOOPZ_VERBOSE", "0") == "1"
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Data Structures
+# ══════════════════════════════════════════════════════════════════════════════
 
-class ScoopzHybrid:
-    def __init__(self):
-        self.queue = asyncio.Queue()
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-        })
-        self.downloaded = 0
-        self.skipped = 0
-        self.failed = 0
-        self.active = 0
-        self.history = set(HISTORY_FILE.read_text().splitlines())
+@dataclass
+class VideoMetadata:
+    """Metadata from TikWM API."""
+    video_id: str
+    author: str
+    title: str
+    duration: float
+    play_url: str
+    hd_play_url: Optional[str] = None
     
-    def log_fail(self, reason: str):
-        if VERBOSE_EVENT_LOGS:
-            print(f"\n[fail] {reason}", flush=True)
-    
-    def update_ui(self):
-        queued = self.queue.qsize()
-        sys.stdout.write(
-            f"\r\033[K ⬇️  Active: {self.active} | "
-            f"✅ Downloaded: {self.downloaded} | "
-            f"⏭️ Skipped: {self.skipped} | "
-            f"❌ Fail: {self.failed} | "
-            f"🕒 Queued: {queued}"
-        )
-        sys.stdout.flush()
-    
-    def send_notification(self, title, msg):
+    @classmethod
+    def from_api_response(cls, data: Dict) -> Optional['VideoMetadata']:
+        """Parse TikWM API response."""
         try:
-            subprocess.run([
-                "termux-notification", 
-                "-t", title, 
-                "-c", msg, 
-                "--id", "scoopz_notif",
-                "--priority", "low"
-            ], capture_output=True, timeout=3, check=False)
-        except:
-            pass
-    
-    def add_to_history(self, video_id):
-        self.history.add(video_id)
-        with open(HISTORY_FILE, "a") as f:
-            f.write(f"{video_id}\n")
-    
-    def _safe_slug(self, text: str, max_len: int = 48) -> str:
-        text = (text or "").strip().lower()
-        text = re.sub(r"\s+", "_", text)
-        text = re.sub(r"[^a-z0-9_\-]", "", text)
-        text = re.sub(r"_+", "_", text).strip("_")
-        return text[:max_len]
-    
-    def _build_video_basename(self, clip: dict, video_id: str) -> str:
-        """Create readable but stable filename with id suffix for uniqueness."""
-        author = ""
-        raw_author = clip.get("author")
-        if isinstance(raw_author, dict):
-            author = (
-                raw_author.get("unique_id")
-                or raw_author.get("nickname")
-                or raw_author.get("id")
-                or ""
+            video_id = str(data.get("id", ""))
+            if not video_id:
+                return None
+            
+            # Parse author
+            author_data = data.get("author", {})
+            if isinstance(author_data, dict):
+                author = (
+                    author_data.get("unique_id") or
+                    author_data.get("nickname") or
+                    author_data.get("id") or
+                    "unknown"
+                )
+            else:
+                author = str(author_data) if author_data else "unknown"
+            
+            # Parse title
+            title = (
+                data.get("title") or
+                data.get("desc") or
+                data.get("region") or
+                ""
             )
-        elif isinstance(raw_author, str):
-            author = raw_author
+            
+            # Duration
+            duration = float(data.get("duration", 0))
+            
+            # Video URLs
+            play_url = data.get("play")
+            hd_play_url = data.get("hdplay")
+            
+            if not play_url:
+                return None
+            
+            return cls(
+                video_id=video_id,
+                author=author,
+                title=title,
+                duration=duration,
+                play_url=play_url,
+                hd_play_url=hd_play_url
+            )
+        except Exception:
+            return None
+
+@dataclass
+class ValidationResult:
+    """Result of video file validation."""
+    valid: bool
+    reason: str = ""
+    can_extract_thumbnail: bool = False
+    can_extract_frames: bool = False
+    duration: float = 0.0
+    file_size: int = 0
+
+@dataclass
+class DownloadStats:
+    """Download statistics."""
+    downloaded: int = 0
+    skipped: int = 0
+    failed: int = 0
+    active: int = 0
+    queued: int = 0
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Video Validation (Critical for Caption Workflow)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class VideoValidator:
+    """
+    Validates downloaded videos for thumbnail extraction + AI captioning.
+    
+    This is the CORE of your workflow - if a video passes validation,
+    it WILL work in both the picker UI and caption generation.
+    """
+    
+    @staticmethod
+    def validate_file(video_path: Path) -> ValidationResult:
+        """
+        Comprehensive validation for caption workflow.
         
-        title = (
-            clip.get("title")
-            or clip.get("desc")
-            or clip.get("region")
-            or ""
+        Checks:
+        1. File exists and has minimum size
+        2. FFmpeg can read video metadata
+        3. Duration is within acceptable range
+        4. Can extract thumbnail (for picker UI)
+        5. Can extract frames (for AI caption generation)
+        """
+        # Stage 1: Basic file checks
+        if not video_path.exists():
+            return ValidationResult(valid=False, reason="File does not exist")
+        
+        try:
+            file_size = video_path.stat().st_size
+        except Exception as e:
+            return ValidationResult(valid=False, reason=f"Cannot stat file: {e}")
+        
+        if file_size < MIN_FILE_SIZE:
+            return ValidationResult(
+                valid=False,
+                reason=f"File too small: {file_size} bytes < {MIN_FILE_SIZE}",
+                file_size=file_size
+            )
+        
+        # Stage 2: FFmpeg metadata check
+        duration = VideoValidator._get_video_duration(video_path)
+        if duration <= 0:
+            return ValidationResult(
+                valid=False,
+                reason="Cannot read video duration (corrupt file)",
+                file_size=file_size
+            )
+        
+        # Stage 3: Duration validation
+        if duration < MIN_DURATION:
+            return ValidationResult(
+                valid=False,
+                reason=f"Video too short: {duration:.1f}s < {MIN_DURATION}s",
+                duration=duration,
+                file_size=file_size
+            )
+        
+        if MAX_DURATION > 0 and duration > MAX_DURATION:
+            return ValidationResult(
+                valid=False,
+                reason=f"Video too long: {duration:.1f}s > {MAX_DURATION}s",
+                duration=duration,
+                file_size=file_size
+            )
+        
+        # Stage 4: Thumbnail extraction test (for picker UI)
+        can_thumbnail = VideoValidator._can_extract_thumbnail(video_path)
+        if REQUIRE_THUMBNAIL and not can_thumbnail:
+            return ValidationResult(
+                valid=False,
+                reason="Cannot extract thumbnail (file will appear as no-thumb in picker)",
+                duration=duration,
+                file_size=file_size,
+                can_extract_thumbnail=False
+            )
+        
+        # Stage 5: Frame extraction test (for AI caption generation)
+        can_frames = VideoValidator._can_extract_frames(video_path)
+        if REQUIRE_FRAME_EXTRACTION and not can_frames:
+            return ValidationResult(
+                valid=False,
+                reason="Cannot extract frames (AI captioning will fail)",
+                duration=duration,
+                file_size=file_size,
+                can_extract_thumbnail=can_thumbnail,
+                can_extract_frames=False
+            )
+        
+        # All checks passed!
+        return ValidationResult(
+            valid=True,
+            reason="Valid for thumbnail + caption workflow",
+            duration=duration,
+            file_size=file_size,
+            can_extract_thumbnail=can_thumbnail,
+            can_extract_frames=can_frames
         )
-        
-        author_slug = self._safe_slug(author, max_len=20)
-        title_slug = self._safe_slug(title, max_len=40)
-        id_suffix = self._safe_slug(video_id, max_len=24) or "vid"
-        
-        parts = []
-        if author_slug:
-            parts.append(author_slug)
-        if title_slug:
-            parts.append(title_slug)
-        parts.append(id_suffix)
-        
-        return "__".join(parts)
     
-    async def watch_inbox(self):
-        while True:
-            if INBOX_PATH.exists() and INBOX_PATH.stat().st_size > 0:
-                try:
-                    raw_content = INBOX_PATH.read_text().strip()
-                    if raw_content:
-                        found_urls = []
-                        for line in raw_content.splitlines():
-                            m = TIKTOK_RE.search(line)
-                            if m:
-                                found_urls.append(m.group(0).strip())
-                        
-                        if found_urls:
-                            INBOX_PATH.write_text("")
-                            for url in found_urls:
-                                await self.queue.put(url)
-                            self.update_ui()
-                except Exception as e:
-                    self.log_fail(f"inbox read: {type(e).__name__}")
+    @staticmethod
+    def _get_video_duration(video_path: Path) -> float:
+        """Get video duration using ffprobe."""
+        try:
+            result = subprocess.run([
+                "ffprobe",
+                "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(video_path)
+            ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False
+            )
             
-            await asyncio.sleep(POLL_RATE)
+            if result.returncode == 0 and result.stdout.strip():
+                return float(result.stdout.strip())
+            
+            return 0.0
+        except (FileNotFoundError, subprocess.TimeoutExpired, ValueError):
+            return 0.0
     
-    def _sync_download(self, play_url, final_path):
-        """Runs blocking requests operations safely in a thread."""
-        temp_path = final_path.with_suffix('.mp4.part')
+    @staticmethod
+    def _can_extract_thumbnail(video_path: Path) -> bool:
+        """
+        Test if thumbnail can be extracted.
+        Mirrors the picker's thumbnail generation logic.
+        """
+        # Try multiple seek points (same as picker does)
+        seek_points = ["1", "2", "0.5", "0.1"]
         
-        def _can_decode_video(path: Path) -> tuple[bool, str]:
-            """
-            FIXED: Check if ffmpeg can decode the video.
-            This is the ONLY validation that matters for Scoopz.
-            """
+        for seek in seek_points:
             try:
-                if not path.exists():
-                    return False, "temp file missing"
-                
-                size = path.stat().st_size
-                if size < MIN_BYTES:
-                    return False, f"file too small ({size} bytes < {MIN_BYTES})"
-                
-            except Exception as e:
-                return False, f"stat error: {type(e).__name__}"
-            
-            # Test if ffmpeg can decode at least 1 frame
-            try:
-                result = subprocess.run(
-                    [
-                        "ffmpeg",
-                        "-nostdin",
-                        "-v", "error",
-                        "-i", str(path),
-                        "-map", "0:v:0",
-                        "-frames:v", "1",
-                        "-f", "null",
-                        "-"
-                    ],
+                result = subprocess.run([
+                    "ffmpeg",
+                    "-nostdin",
+                    "-v", "error",
+                    "-ss", seek,
+                    "-i", str(video_path),
+                    "-vframes", "1",
+                    "-f", "null",
+                    "-"
+                ],
                     capture_output=True,
-                    text=True,
-                    timeout=15,
+                    timeout=12,
+                    check=False
+                )
+                
+                if result.returncode == 0:
+                    return True
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                return False
+        
+        return False
+    
+    @staticmethod
+    def _can_extract_frames(video_path: Path) -> bool:
+        """
+        Test if frames can be extracted for AI captioning.
+        Tests extraction at 25% and 75% (typical caption workflow).
+        """
+        duration = VideoValidator._get_video_duration(video_path)
+        if duration <= 0:
+            return False
+        
+        # Test frame extraction at key points (same as your caption script)
+        test_points = [
+            duration * 0.25,
+            duration * 0.75
+        ]
+        
+        for seek_time in test_points:
+            try:
+                result = subprocess.run([
+                    "ffmpeg",
+                    "-nostdin",
+                    "-v", "error",
+                    "-ss", str(seek_time),
+                    "-i", str(video_path),
+                    "-vframes", "1",
+                    "-f", "null",
+                    "-"
+                ],
+                    capture_output=True,
+                    timeout=12,
                     check=False
                 )
                 
                 if result.returncode != 0:
-                    # FIXED: Return actual ffmpeg error, not generic message
-                    stderr = (result.stderr or "").strip()
-                    return False, f"decode failed: {stderr[:100] if stderr else 'unknown error'}"
-                
-                # Optional: Check thumbnail extraction (disabled by default)
-                if VALIDATE_THUMBNAIL:
-                    thumb_ok = self._can_extract_thumbnail(path)
-                    if not thumb_ok:
-                        # Don't fail - just warn
-                        print(f"\n⚠️  Warning: Thumbnail extraction failed for {path.name}", flush=True)
-                
-                return True, ""
-            
-            except FileNotFoundError:
-                # ffmpeg not installed - accept file based on size only
-                return True, ""
-            except subprocess.TimeoutExpired:
-                return False, "ffmpeg timeout"
-            except Exception as e:
-                return False, f"validation error: {type(e).__name__}"
+                    return False
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                return False
         
-        def _can_extract_thumbnail(path: Path) -> bool:
-            """Test if thumbnail can be extracted (optional check)."""
-            for seek in ["1", "2", "0.5"]:
-                try:
-                    result = subprocess.run(
-                        [
-                            "ffmpeg",
-                            "-nostdin",
-                            "-v", "error",
-                            "-ss", seek,
-                            "-i", str(path),
-                            "-vframes", "1",
-                            "-f", "null",
-                            "-"
-                        ],
-                        capture_output=True,
-                        timeout=10,
-                        check=False
-                    )
-                    if result.returncode == 0:
-                        return True
-                except:
-                    pass
-            return False
+        return True
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Downloader
+# ══════════════════════════════════════════════════════════════════════════════
+
+class VideoDownloader:
+    """Handles video download with validation and retries."""
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.8"
+        })
+    
+    def download(self, metadata: VideoMetadata, output_path: Path) -> Tuple[bool, str]:
+        """
+        Download video with validation.
+        
+        Returns:
+            (success: bool, reason: str)
+        """
+        # Use HD URL if available
+        url = metadata.hd_play_url or metadata.play_url
+        
+        temp_path = output_path.with_suffix('.mp4.part')
+        
+        # Clean up any stale temp files
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except:
+            pass
         
         # Download with retries
-        retries = max(1, DOWNLOAD_RETRIES)
-        last_error = ""
-        
-        for attempt in range(retries):
+        for attempt in range(DOWNLOAD_RETRIES):
             try:
-                # Download file
-                with self.session.get(
-                    play_url,
-                    stream=True,
-                    timeout=30,
-                    headers={
-                        "Referer": "https://www.tiktok.com/",
-                        "Accept": "video/*,*/*;q=0.8",
-                    }
-                ) as r:
-                    r.raise_for_status()
-                    
-                    # Check content type
-                    ctype = (r.headers.get("Content-Type") or "").lower()
-                    if "text/html" in ctype or "application/json" in ctype:
-                        last_error = f"invalid content-type: {ctype}"
-                        if attempt < retries - 1:
-                            time.sleep(2)
-                            continue
-                        return False, last_error
-                    
-                    # Download to temp file
-                    with open(temp_path, "wb") as f:
-                        shutil.copyfileobj(r.raw, f)
+                # Download to temp file
+                success, reason = self._download_file(url, temp_path)
+                
+                if not success:
+                    if attempt < DOWNLOAD_RETRIES - 1:
+                        time.sleep(RETRY_BACKOFF ** attempt)
+                        continue
+                    return False, reason
                 
                 # Validate downloaded file
-                is_valid, reason = _can_decode_video(temp_path)
+                validation = VideoValidator.validate_file(temp_path)
                 
-                if not is_valid:
-                    last_error = reason
-                    
-                    # Clean up bad file
+                if not validation.valid:
+                    # Clean up invalid file
                     try:
                         temp_path.unlink()
                     except:
                         pass
                     
-                    # Retry on validation failure
-                    if attempt < retries - 1:
-                        time.sleep(2)
+                    if attempt < DOWNLOAD_RETRIES - 1:
+                        time.sleep(RETRY_BACKOFF ** attempt)
                         continue
                     
-                    return False, last_error
+                    return False, f"Validation failed: {validation.reason}"
                 
-                # Success - rename to final path
-                temp_path.rename(final_path)
+                # Success! Move to final location
+                temp_path.rename(output_path)
                 return True, ""
             
             except Exception as e:
-                last_error = f"{type(e).__name__}: {str(e)[:100]}"
-                
-                # Clean up partial file
+                # Clean up on exception
                 try:
                     if temp_path.exists():
                         temp_path.unlink()
                 except:
                     pass
                 
-                # Retry on exception
-                if attempt < retries - 1:
-                    time.sleep(2)
+                if attempt < DOWNLOAD_RETRIES - 1:
+                    time.sleep(RETRY_BACKOFF ** attempt)
                     continue
+                
+                return False, f"Download error: {type(e).__name__}"
         
-        return False, last_error
+        return False, "Download failed after retries"
     
-    async def download_worker(self):
-        while True:
-            url = await self.queue.get()
-            self.active += 1
-            self.update_ui()
-            
-            try:
-                data = None
-                last_api_err = ""
+    def _download_file(self, url: str, output_path: Path) -> Tuple[bool, str]:
+        """Download single file from URL."""
+        try:
+            with self.session.get(
+                url,
+                stream=True,
+                timeout=DOWNLOAD_TIMEOUT,
+                headers={"Referer": "https://www.tiktok.com/"}
+            ) as response:
+                response.raise_for_status()
                 
-                # API retry loop
-                for attempt in range(3):
-                    try:
-                        resp = await asyncio.to_thread(
-                            self.session.post, 
-                            TIKWM_API, 
-                            data={"url": url, "hd": 1}, 
-                            timeout=15
-                        )
-                        resp.raise_for_status()
-                        data = resp.json()
-                        
-                        if data.get("code") == 0:
-                            break
-                        
-                        last_api_err = f"api code {data.get('code')}: {data.get('msg', 'no message')}"
-                        
-                        if data.get("code") == -1:
-                            await asyncio.sleep(2)
-                    
-                    except Exception as e:
-                        last_api_err = f"api request: {type(e).__name__}"
-                        await asyncio.sleep(2)
-                
-                if not data or data.get("code") != 0:
-                    self.failed += 1
-                    self.log_fail(last_api_err or "api returned no data")
-                    continue
-                
-                clip = data.get("data", {})
-                video_id = clip.get("id", "unknown")
-                
-                # Check history
-                if video_id in self.history:
-                    self.skipped += 1
-                    continue
-                
-                # Get video URL
-                play_url = clip.get("hdplay") or clip.get("play")
-                if not play_url:
-                    self.failed += 1
-                    self.log_fail(f"no play url (id={video_id})")
-                    continue
-                
-                # Build filename
-                file_base = self._build_video_basename(clip, video_id)
-                final_path = EXPORT_DIR / f"{file_base}.mp4"
+                # Check content type
+                content_type = response.headers.get("Content-Type", "").lower()
+                if "text/html" in content_type or "application/json" in content_type:
+                    return False, f"Invalid content-type: {content_type}"
                 
                 # Download
+                with open(output_path, "wb") as f:
+                    shutil.copyfileobj(response.raw, f)
+                
+                return True, ""
+        
+        except requests.exceptions.Timeout:
+            return False, "Download timeout"
+        except requests.exceptions.HTTPError as e:
+            return False, f"HTTP {e.response.status_code}"
+        except Exception as e:
+            return False, f"{type(e).__name__}"
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TikWM API Client
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TikWMClient:
+    """TikWM API client with retry logic."""
+    
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+    
+    def get_video_info(self, url: str) -> Optional[VideoMetadata]:
+        """
+        Get video metadata from TikWM API.
+        
+        Returns:
+            VideoMetadata on success, None on failure
+        """
+        for attempt in range(API_RETRIES):
+            try:
+                response = self.session.post(
+                    TIKWM_API,
+                    data={"url": url, "hd": 1},
+                    timeout=API_TIMEOUT
+                )
+                response.raise_for_status()
+                
+                data = response.json()
+                
+                if data.get("code") != 0:
+                    error_msg = data.get("msg", "Unknown API error")
+                    if attempt < API_RETRIES - 1 and data.get("code") == -1:
+                        time.sleep(RETRY_BACKOFF ** attempt)
+                        continue
+                    return None
+                
+                clip_data = data.get("data", {})
+                return VideoMetadata.from_api_response(clip_data)
+            
+            except requests.exceptions.Timeout:
+                if attempt < API_RETRIES - 1:
+                    time.sleep(RETRY_BACKOFF ** attempt)
+                    continue
+                return None
+            except Exception:
+                if attempt < API_RETRIES - 1:
+                    time.sleep(RETRY_BACKOFF ** attempt)
+                    continue
+                return None
+        
+        return None
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Main Collector
+# ══════════════════════════════════════════════════════════════════════════════
+
+class ScoopzCollector:
+    """Main collector orchestrator."""
+    
+    def __init__(self):
+        self.api_client = TikWMClient()
+        self.downloader = VideoDownloader()
+        
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.stats = DownloadStats()
+        self.history: Set[str] = set()
+        
+        # Initialize
+        self._ensure_directories()
+        self._load_history()
+    
+    def _ensure_directories(self):
+        """Create required directories."""
+        EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+        
+        if not HISTORY_FILE.exists():
+            HISTORY_FILE.touch()
+        
+        if not LOG_FILE.exists():
+            LOG_FILE.touch()
+    
+    def _load_history(self):
+        """Load download history."""
+        try:
+            content = HISTORY_FILE.read_text()
+            self.history = set(line.strip() for line in content.splitlines() if line.strip())
+        except:
+            self.history = set()
+    
+    def _add_to_history(self, video_id: str):
+        """Add video to history."""
+        if video_id not in self.history:
+            self.history.add(video_id)
+            try:
+                with open(HISTORY_FILE, "a") as f:
+                    f.write(f"{video_id}\n")
+            except:
+                pass
+    
+    def _log_error(self, video_id: str, reason: str):
+        """Log error to file."""
+        try:
+            timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+            with open(LOG_FILE, "a") as f:
+                f.write(f"[{timestamp}] {video_id}: {reason}\n")
+        except:
+            pass
+        
+        if VERBOSE_LOGGING:
+            print(f"\n[fail] {video_id}: {reason}", flush=True)
+    
+    def _update_ui(self):
+        """Update terminal UI."""
+        self.stats.queued = self.queue.qsize()
+        
+        sys.stdout.write(
+            f"\r\033[K⬇️  Active: {self.stats.active} | "
+            f"✅ Downloaded: {self.stats.downloaded} | "
+            f"⏭️  Skipped: {self.stats.skipped} | "
+            f"❌ Failed: {self.stats.failed} | "
+            f"🕒 Queued: {self.stats.queued}"
+        )
+        sys.stdout.flush()
+    
+    def _send_notification(self, title: str, message: str):
+        """Send Android notification."""
+        try:
+            subprocess.run([
+                "termux-notification",
+                "-t", title,
+                "-c", message,
+                "--id", "scoopz_collector",
+                "--priority", "low"
+            ],
+                capture_output=True,
+                timeout=3,
+                check=False
+            )
+        except:
+            pass
+    
+    def _safe_filename(self, text: str, max_len: int = 48) -> str:
+        """Create safe filename component."""
+        text = (text or "").strip().lower()
+        text = re.sub(r"\s+", "_", text)
+        text = re.sub(r"[^a-z0-9_\-]", "", text)
+        text = re.sub(r"_+", "_", text).strip("_")
+        return text[:max_len]
+    
+    def _build_filename(self, metadata: VideoMetadata) -> str:
+        """Build readable filename."""
+        author = self._safe_filename(metadata.author, max_len=20)
+        title = self._safe_filename(metadata.title, max_len=40)
+        video_id = self._safe_filename(metadata.video_id, max_len=24)
+        
+        parts = []
+        if author:
+            parts.append(author)
+        if title:
+            parts.append(title)
+        parts.append(video_id)
+        
+        return "__".join(parts) + ".mp4"
+    
+    async def _watch_inbox(self):
+        """Watch inbox file for new URLs."""
+        while True:
+            try:
+                if INBOX_PATH.exists() and INBOX_PATH.stat().st_size > 0:
+                    content = INBOX_PATH.read_text().strip()
+                    
+                    if content:
+                        # Extract URLs
+                        urls = []
+                        for line in content.splitlines():
+                            match = TIKTOK_URL_PATTERN.search(line)
+                            if match:
+                                urls.append(match.group(0).strip())
+                        
+                        # Clear inbox immediately
+                        if urls:
+                            INBOX_PATH.write_text("")
+                            
+                            # Add to queue
+                            for url in urls:
+                                await self.queue.put(url)
+                            
+                            self._update_ui()
+            except:
+                pass
+            
+            await asyncio.sleep(POLL_INTERVAL)
+    
+    async def _download_worker(self):
+        """Download worker."""
+        while True:
+            url = await self.queue.get()
+            
+            try:
+                self.stats.active += 1
+                self._update_ui()
+                
+                # Get video metadata
+                metadata = await asyncio.to_thread(
+                    self.api_client.get_video_info,
+                    url
+                )
+                
+                if not metadata:
+                    self.stats.failed += 1
+                    self._log_error("unknown", "API returned no metadata")
+                    continue
+                
+                # Check history
+                if metadata.video_id in self.history:
+                    self.stats.skipped += 1
+                    continue
+                
+                # Build output path
+                filename = self._build_filename(metadata)
+                output_path = EXPORT_DIR / filename
+                
+                # Download and validate
                 success, reason = await asyncio.to_thread(
-                    self._sync_download, 
-                    play_url, 
-                    final_path
+                    self.downloader.download,
+                    metadata,
+                    output_path
                 )
                 
                 if success:
                     # Add to media library
                     try:
-                        subprocess.run(
-                            ["termux-media-scan", str(final_path)], 
+                        subprocess.run([
+                            "termux-media-scan",
+                            str(output_path)
+                        ],
                             capture_output=True,
                             timeout=5,
                             check=False
@@ -375,40 +686,71 @@ class ScoopzHybrid:
                     except:
                         pass
                     
-                    self.add_to_history(video_id)
-                    self.downloaded += 1
-                    self.send_notification(
-                        "Scoopz Downloaded", 
-                        f"Saved {final_path.name[:40]}"
+                    # Update records
+                    self._add_to_history(metadata.video_id)
+                    self.stats.downloaded += 1
+                    
+                    # Notify
+                    self._send_notification(
+                        "Scoopz Downloaded",
+                        f"{metadata.author}: {metadata.title[:30]}"
                     )
                 else:
-                    self.failed += 1
-                    self.log_fail(f"{video_id}: {reason}")
+                    self.stats.failed += 1
+                    self._log_error(metadata.video_id, reason)
             
             except Exception as e:
-                self.failed += 1
-                self.log_fail(f"worker crash: {type(e).__name__}: {str(e)[:100]}")
+                self.stats.failed += 1
+                self._log_error("unknown", f"Worker error: {type(e).__name__}")
             
             finally:
-                self.active -= 1
+                self.stats.active -= 1
                 self.queue.task_done()
-                self.update_ui()
+                self._update_ui()
     
     async def run(self):
-        self.send_notification("Scoopz Active", "Watching for TikTok links...")
-        print("📋 Starting collector — browse TikTok and Share → Copy Link\n")
+        """Run collector."""
+        print("=" * 70)
+        print("🎬 Scoopz Collector v2")
+        print("=" * 70)
+        print(f"Export directory: {EXPORT_DIR}")
+        print(f"Workers: {MAX_WORKERS}")
+        print(f"Min duration: {MIN_DURATION}s")
+        print(f"Max duration: {MAX_DURATION}s" if MAX_DURATION > 0 else "Max duration: unlimited")
+        print(f"Require thumbnail: {REQUIRE_THUMBNAIL}")
+        print(f"Require frame extraction: {REQUIRE_FRAME_EXTRACTION}")
+        print("=" * 70)
+        print("\n📋 Watching inbox — Share TikTok → Copy Link\n")
         
+        # Send notification
+        self._send_notification(
+            "Scoopz Active",
+            "Watching for TikTok links..."
+        )
+        
+        # Start workers
         workers = [
-            asyncio.create_task(self.download_worker()) 
+            asyncio.create_task(self._download_worker())
             for _ in range(MAX_WORKERS)
         ]
-        watcher = asyncio.create_task(self.watch_inbox())
         
+        watcher = asyncio.create_task(self._watch_inbox())
+        
+        # Run forever
         await asyncio.gather(watcher, *workers)
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Entry Point
+# ══════════════════════════════════════════════════════════════════════════════
+
+def main():
+    """Main entry point."""
+    try:
+        collector = ScoopzCollector()
+        asyncio.run(collector.run())
+    except KeyboardInterrupt:
+        print("\n\n👋 Stopped.\n")
+        sys.exit(0)
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(ScoopzHybrid().run())
-    except KeyboardInterrupt:
-        print("\n\n👋 Stopped.")
+    main()
