@@ -149,7 +149,7 @@ class VideoValidator:
     """
     
     @staticmethod
-    def validate_file(video_path: Path) -> ValidationResult:
+    def validate_file(video_path: Path, expected_duration: float = 0.0) -> ValidationResult:
         """
         Comprehensive validation for caption workflow.
         
@@ -176,12 +176,16 @@ class VideoValidator:
                 file_size=file_size
             )
         
-        # Stage 2: FFmpeg metadata check
+        # Stage 2: FFmpeg metadata check (with fallback)
         duration = VideoValidator._get_video_duration(video_path)
-        if duration <= 0:
+        if duration <= 0 and expected_duration > 0:
+            duration = float(expected_duration)
+
+        # Some builds fail duration probing for valid files; require decodability instead.
+        if duration <= 0 and not VideoValidator._can_decode_video(video_path):
             return ValidationResult(
                 valid=False,
-                reason="Cannot read video duration (corrupt file)",
+                reason="Cannot decode video stream",
                 file_size=file_size
             )
         
@@ -214,7 +218,7 @@ class VideoValidator:
             )
         
         # Stage 5: Frame extraction test (for AI caption generation)
-        can_frames = VideoValidator._can_extract_frames(video_path)
+        can_frames = VideoValidator._can_extract_frames(video_path, duration_hint=duration)
         if REQUIRE_FRAME_EXTRACTION and not can_frames:
             return ValidationResult(
                 valid=False,
@@ -340,20 +344,22 @@ class VideoValidator:
         return False
     
     @staticmethod
-    def _can_extract_frames(video_path: Path) -> bool:
+    def _can_extract_frames(video_path: Path, duration_hint: float = 0.0) -> bool:
         """
         Test if frames can be extracted for AI captioning.
-        Tests extraction at 25% and 75% (typical caption workflow).
+        If duration is unknown on this device, use fixed seek points fallback.
         """
-        duration = VideoValidator._get_video_duration(video_path)
-        if duration <= 0:
-            return False
+        duration = duration_hint if duration_hint > 0 else VideoValidator._get_video_duration(video_path)
         
-        # Test frame extraction at key points (same as your caption script)
-        test_points = [
-            duration * 0.25,
-            duration * 0.75
-        ]
+        if duration > 0:
+            # Test frame extraction at key points (same as your caption script)
+            test_points = [
+                duration * 0.25,
+                duration * 0.75
+            ]
+        else:
+            # Fallback for devices where duration probing is unreliable.
+            test_points = [0.5, 1.5]
         
         for seek_time in test_points:
             try:
@@ -378,6 +384,28 @@ class VideoValidator:
                 return False
         
         return True
+
+    @staticmethod
+    def _can_decode_video(video_path: Path) -> bool:
+        """Quick smoke test: can ffmpeg decode at least one video frame?"""
+        try:
+            result = subprocess.run([
+                "ffmpeg",
+                "-nostdin",
+                "-v", "error",
+                "-i", str(video_path),
+                "-map", "0:v:0",
+                "-frames:v", "1",
+                "-f", "null",
+                "-"
+            ],
+                capture_output=True,
+                timeout=12,
+                check=False
+            )
+            return result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Downloader
@@ -425,7 +453,10 @@ class VideoDownloader:
                     return False, reason
                 
                 # Validate downloaded file
-                validation = VideoValidator.validate_file(temp_path)
+                validation = VideoValidator.validate_file(
+                    temp_path,
+                    expected_duration=metadata.duration
+                )
                 
                 if not validation.valid:
                     # Clean up invalid file
@@ -613,11 +644,11 @@ class ScoopzCollector:
         self.stats.queued = self.queue.qsize()
 
         status = (
-            f"Active: {self.stats.active} | "
-            f"Downloaded: {self.stats.downloaded} | "
-            f"Skipped: {self.stats.skipped} | "
-            f"Failed: {self.stats.failed} | "
-            f"Queued: {self.stats.queued}"
+            f"A:{self.stats.active} "
+            f"D:{self.stats.downloaded} "
+            f"S:{self.stats.skipped} "
+            f"F:{self.stats.failed} "
+            f"Q:{self.stats.queued}"
         )
 
         if USE_ANSI_STATUS:
