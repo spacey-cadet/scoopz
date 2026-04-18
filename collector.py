@@ -30,9 +30,8 @@ MIN_BYTES = int(os.environ.get("SCOOPZ_MIN_BYTES", "250000"))
 # Download retries (per video). Lower = faster, higher = more resilient.
 DOWNLOAD_RETRIES = int(os.environ.get("SCOOPZ_DOWNLOAD_RETRIES", "2"))
 
-# Extra safety: reject videos that cannot yield a thumbnail frame.
-# Set SCOOPZ_VALIDATE_THUMBNAIL=0 to disable this check.
-VALIDATE_THUMBNAIL = os.environ.get("SCOOPZ_VALIDATE_THUMBNAIL", "1") != "0"
+# Extra safety: always reject videos that cannot yield a thumbnail frame.
+VALIDATE_THUMBNAIL = True
 
 class ScoopzHybrid:
     def __init__(self):
@@ -171,8 +170,6 @@ class ScoopzHybrid:
             return False
 
         def _looks_valid_mp4(path: Path) -> tuple[bool, str]:
-            ffprobe_ok = None
-            ffprobe_err = False
             try:
                 if not path.exists():
                     return False, "missing temp file"
@@ -180,40 +177,6 @@ class ScoopzHybrid:
                     return False, "file too small"
             except Exception:
                 return False, "temp file stat failed"
-
-            # Prefer ffprobe if available (fast + accurate).
-            try:
-                r = subprocess.run(
-                    [
-                        "ffprobe",
-                        "-v", "error",
-                        "-select_streams", "v:0",
-                        "-show_entries", "format=duration",
-                        "-of", "default=nw=1:nk=1",
-                        str(path),
-                    ],
-                    capture_output=True,
-                    text=True,
-                    timeout=10,
-                    check=False,
-                )
-                if r.returncode != 0:
-                    ffprobe_err = True
-                dur_s = (r.stdout or "").strip()
-                try:
-                    dur = float(dur_s)
-                except Exception:
-                    dur = 0.0
-                ffprobe_ok = dur > 0.5
-            except FileNotFoundError:
-                # ffprobe not installed; best-effort fallback already checked size.
-                pass
-            except Exception:
-                ffprobe_err = True
-
-            # If ffprobe ran, require a reasonable positive duration.
-            if ffprobe_ok is False:
-                return False, "duration too short"
 
             if VALIDATE_THUMBNAIL and not _can_extract_thumbnail(path):
                 return False, "no extractable thumbnail"
@@ -242,13 +205,7 @@ class ScoopzHybrid:
                     check=False,
                 )
                 if r.returncode != 0:
-                    if ffprobe_err:
-                        return False, "ffprobe rejected and ffmpeg decode failed"
                     return False, "ffmpeg decode check failed"
-
-                # ffmpeg decoded fine, so accept even if ffprobe is picky on this device/build.
-                if ffprobe_err:
-                    return True, ""
                 return True, ""
             except FileNotFoundError:
                 # ffmpeg not installed: fall back to size-only.
