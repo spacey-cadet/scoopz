@@ -119,7 +119,11 @@ class ScoopzHybrid:
                 try:
                     raw_content = INBOX_PATH.read_text().strip()
                     if raw_content:
-                        found_urls = [l.strip() for l in raw_content.splitlines() if TIKTOK_RE.search(l)]
+                        found_urls = []
+                        for line in raw_content.splitlines():
+                            m = TIKTOK_RE.search(line)
+                            if m:
+                                found_urls.append(m.group(0).strip())
                         if found_urls:
                             INBOX_PATH.write_text("") # Clear inbox immediately
                             for url in found_urls:
@@ -132,6 +136,39 @@ class ScoopzHybrid:
     def _sync_download(self, play_url, final_path):
         """Runs blocking requests operations safely in a thread"""
         temp_path = final_path.with_suffix('.mp4.part')
+        repaired_path = final_path.with_suffix('.mp4.repaired.part')
+
+        def _repair_container_for_thumbnail(src: Path, dst: Path) -> bool:
+            # Some phone/ffmpeg builds fail thumbs on fragmented mp4 containers.
+            # Fast remux often fixes seekability without re-encoding.
+            try:
+                if dst.exists():
+                    dst.unlink(missing_ok=True)
+                r = subprocess.run(
+                    [
+                        "ffmpeg",
+                        "-nostdin",
+                        "-v",
+                        "error",
+                        "-y",
+                        "-i",
+                        str(src),
+                        "-c",
+                        "copy",
+                        "-movflags",
+                        "+faststart",
+                        str(dst),
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=20,
+                    check=False,
+                )
+                return r.returncode == 0 and dst.exists() and dst.stat().st_size > 0
+            except FileNotFoundError:
+                return False
+            except Exception:
+                return False
 
         def _can_extract_thumbnail(path: Path) -> bool:
             # Mirror picker behavior: if none of these seeks work,
@@ -239,13 +276,30 @@ class ScoopzHybrid:
                 # Validate before saving into the gallery folder.
                 is_valid, reason = _looks_valid_mp4(temp_path)
                 if not is_valid:
+                    # One repair pass before giving up: helps with container quirks across devices.
+                    if reason == "no extractable thumbnail" and _repair_container_for_thumbnail(temp_path, repaired_path):
+                        is_valid, reason = _looks_valid_mp4(repaired_path)
+                        if is_valid:
+                            try:
+                                temp_path.unlink(missing_ok=True)
+                            except Exception:
+                                pass
+                            repaired_path.rename(temp_path)
+
+                    if not is_valid:
+                        try:
+                            temp_path.unlink(missing_ok=True)
+                            repaired_path.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                        if attempt < retries - 1:
+                            time.sleep(2)
+                        continue
+
                     try:
-                        temp_path.unlink(missing_ok=True)
+                        repaired_path.unlink(missing_ok=True)
                     except Exception:
                         pass
-                    if attempt < retries - 1:
-                        time.sleep(2)
-                    continue
                 
                 # Success! Rename to final mp4
                 temp_path.rename(final_path)
@@ -255,6 +309,8 @@ class ScoopzHybrid:
                 # Clean up corrupted partial file if it failed
                 if temp_path.exists():
                     temp_path.unlink()
+                if repaired_path.exists():
+                    repaired_path.unlink()
                 
                 if attempt < retries - 1:
                     time.sleep(2) # Wait before retry
