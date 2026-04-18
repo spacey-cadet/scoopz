@@ -5,7 +5,14 @@
 #  HOW TO INSTALL (run once):
 #    echo "source ~/scoopz/scoopz_env.sh" >> ~/.bashrc && source ~/.bashrc
 # ══════════════════════════════════════════════════════
-export SCOOPZ_DIR="$HOME/scoopz"
+# App code location
+export SCOOPZ_APP_DIR="${SCOOPZ_APP_DIR:-$HOME/scoopz}"
+
+# Media location (used by collector/captions scripts)
+export SCOOPZ_MEDIA_DIR="${SCOOPZ_MEDIA_DIR:-/sdcard/Pictures/scoopz}"
+
+# Keep SCOOPZ_DIR for script compatibility (media path)
+export SCOOPZ_DIR="$SCOOPZ_MEDIA_DIR"
 
 # ── Config files (Termux) ───────────────────────────────────────────────────
 SCOOPZ_CONFIG_DIR="$HOME/.config/scoopz"
@@ -126,16 +133,16 @@ scoopz-remote-auto() {
 # ── collect ───────────────────────────────────────────────────────────────────
 collect() {
     echo "📋 Starting collector — browse TikTok and Share → Copy Link"
-    cd "$SCOOPZ_DIR" && python collector.py
+    cd "$SCOOPZ_APP_DIR" && python collector.py
 }
 
 # ── NewsBreak Caption Generator ──────────────────────────────────────────────
 caption() {
     echo "🎬 Starting NewsBreak caption generator..."
-    cd "$SCOOPZ_DIR" || return 1
+    cd "$SCOOPZ_APP_DIR" || return 1
     
     if [ ! -f "newsbreak_captions.py" ]; then
-        echo "⚠️  newsbreak_captions.py not found in $SCOOPZ_DIR"
+        echo "⚠️  newsbreak_captions.py not found in $SCOOPZ_APP_DIR"
         return 1
     fi
     
@@ -144,10 +151,10 @@ caption() {
 
 caption-bg() {
     echo "🎬 Starting NewsBreak caption generator in background..."
-    cd "$SCOOPZ_DIR" || return 1
+    cd "$SCOOPZ_APP_DIR" || return 1
     
     if [ ! -f "newsbreak_captions.py" ]; then
-        echo "⚠️  newsbreak_captions.py not found in $SCOOPZ_DIR"
+        echo "⚠️  newsbreak_captions.py not found in $SCOOPZ_APP_DIR"
         return 1
     fi
     
@@ -166,7 +173,7 @@ caption-stop() {
 }
 
 caption-logs() {
-    tail -f "$SCOOPZ_DIR/logs/captions.log"
+    tail -f "$SCOOPZ_APP_DIR/logs/captions.log"
 }
 
 # ── Status ────────────────────────────────────────────────────────────────────
@@ -188,14 +195,15 @@ scoopz-status() {
     echo ""
     echo "── Videos ─────────────────────────────"
     local total
-    total=$(ls "$SCOOPZ_DIR/"*.mp4 2>/dev/null | wc -l)
+    total=$(ls "$SCOOPZ_MEDIA_DIR/"*.mp4 2>/dev/null | wc -l)
     echo "   Total videos: $total"
+    echo "   Media dir: $SCOOPZ_MEDIA_DIR"
     
     echo ""
     echo "── Recent Logs ────────────────────────"
-    if [ -f "$SCOOPZ_DIR/logs/captions.log" ]; then
+    if [ -f "$SCOOPZ_APP_DIR/logs/captions.log" ]; then
         echo "   Caption log (last 3 lines):"
-        tail -3 "$SCOOPZ_DIR/logs/captions.log" 2>/dev/null || echo "   (empty)"
+        tail -3 "$SCOOPZ_APP_DIR/logs/captions.log" 2>/dev/null || echo "   (empty)"
     else
         echo "   No logs yet"
     fi
