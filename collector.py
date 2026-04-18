@@ -40,8 +40,8 @@ DOWNLOAD_TIMEOUT = 45
 
 # Validation thresholds (critical for your workflow)
 MIN_FILE_SIZE = 80_000        # 80KB - reject corrupted/partial downloads
-MIN_DURATION = 1.0            # 1 second - reject too-short clips
-MAX_DURATION = 180.0          # 3 minutes - optional, set to 0 to disable
+MIN_DURATION = 0.0            # Disabled: do not reject by short duration
+MAX_DURATION = 0.0            # Disabled: do not reject by long duration
 
 # Retry configuration
 DOWNLOAD_RETRIES = 3
@@ -52,6 +52,7 @@ RETRY_BACKOFF = 2.0  # Exponential backoff multiplier
 REQUIRE_THUMBNAIL = True      # Must be able to extract thumbnail
 REQUIRE_FRAME_EXTRACTION = True  # Must be able to extract frames for AI
 VERBOSE_LOGGING = os.environ.get("SCOOPZ_VERBOSE", "0") == "1"
+USE_ANSI_STATUS = sys.stdout.isatty() and os.environ.get("TERM", "") != "dumb"
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Data Structures
@@ -185,7 +186,7 @@ class VideoValidator:
             )
         
         # Stage 3: Duration validation
-        if duration < MIN_DURATION:
+        if MIN_DURATION > 0 and duration < MIN_DURATION:
             return ValidationResult(
                 valid=False,
                 reason=f"Video too short: {duration:.1f}s < {MIN_DURATION}s",
@@ -288,6 +289,53 @@ class VideoValidator:
                     return True
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 return False
+
+        # Fallback: remux container and retry thumbnail extraction.
+        remux_path = video_path.with_suffix(".thumbfix.mp4")
+        try:
+            remux = subprocess.run([
+                "ffmpeg",
+                "-nostdin",
+                "-v", "error",
+                "-y",
+                "-i", str(video_path),
+                "-c", "copy",
+                "-movflags", "+faststart",
+                str(remux_path),
+            ],
+                capture_output=True,
+                timeout=20,
+                check=False
+            )
+
+            if remux.returncode != 0 or not remux_path.exists() or remux_path.stat().st_size <= 0:
+                return False
+
+            for seek in seek_points:
+                result = subprocess.run([
+                    "ffmpeg",
+                    "-nostdin",
+                    "-v", "error",
+                    "-ss", seek,
+                    "-i", str(remux_path),
+                    "-vframes", "1",
+                    "-f", "null",
+                    "-"
+                ],
+                    capture_output=True,
+                    timeout=12,
+                    check=False
+                )
+                if result.returncode == 0:
+                    return True
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            return False
+        finally:
+            try:
+                if remux_path.exists():
+                    remux_path.unlink()
+            except Exception:
+                pass
         
         return False
     
@@ -509,6 +557,7 @@ class ScoopzCollector:
         self.queue: asyncio.Queue = asyncio.Queue()
         self.stats = DownloadStats()
         self.history: Set[str] = set()
+        self._last_status_len = 0
         
         # Initialize
         self._ensure_directories()
@@ -550,21 +599,34 @@ class ScoopzCollector:
                 f.write(f"[{timestamp}] {video_id}: {reason}\n")
         except:
             pass
-        
-        if VERBOSE_LOGGING:
-            print(f"\n[fail] {video_id}: {reason}", flush=True)
+
+        # Always print fail events, then redraw the live status line.
+        if USE_ANSI_STATUS:
+            sys.stdout.write("\r\033[K")
+        else:
+            sys.stdout.write("\r" + (" " * self._last_status_len) + "\r")
+        print(f"[fail] {video_id}: {reason}", flush=True)
+        self._update_ui()
     
     def _update_ui(self):
         """Update terminal UI."""
         self.stats.queued = self.queue.qsize()
-        
-        sys.stdout.write(
-            f"\r\033[K⬇️  Active: {self.stats.active} | "
-            f"✅ Downloaded: {self.stats.downloaded} | "
-            f"⏭️  Skipped: {self.stats.skipped} | "
-            f"❌ Failed: {self.stats.failed} | "
-            f"🕒 Queued: {self.stats.queued}"
+
+        status = (
+            f"Active: {self.stats.active} | "
+            f"Downloaded: {self.stats.downloaded} | "
+            f"Skipped: {self.stats.skipped} | "
+            f"Failed: {self.stats.failed} | "
+            f"Queued: {self.stats.queued}"
         )
+
+        if USE_ANSI_STATUS:
+            sys.stdout.write(f"\r\033[K{status}")
+        else:
+            pad = max(0, self._last_status_len - len(status))
+            sys.stdout.write(f"\r{status}{' ' * pad}")
+
+        self._last_status_len = len(status)
         sys.stdout.flush()
     
     def _send_notification(self, title: str, message: str):
