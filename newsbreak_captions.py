@@ -372,13 +372,13 @@ def load_videos() -> List[str]:
         skipped = 0
         for video_path in existing:
             thumb = generate_thumbnail(video_path)
-            if thumb:
+            if thumb and can_extract_picker_frames(video_path):
                 filtered.append(video_path)
             else:
                 skipped += 1
 
         if skipped:
-            print(f"⚠ Skipped {skipped} videos with no valid thumbnail")
+            print(f"⚠ Skipped {skipped} videos with no valid thumbnail/frame extraction")
 
         return filtered
     except:
@@ -425,6 +425,31 @@ def generate_thumbnail(video_path: str) -> Optional[str]:
             pass
     
     return None
+
+def can_extract_picker_frames(video_path: str) -> bool:
+    """Quick ffmpeg frame extraction gate for picker eligibility."""
+    duration = get_video_duration(video_path)
+    if duration > 0:
+        test_points = [max(0.1, duration * 0.25), max(0.5, duration * 0.75)]
+    else:
+        test_points = [0.5, 1.5]
+
+    for seek_time in test_points:
+        try:
+            result = subprocess.run([
+                "ffmpeg", "-nostdin", "-v", "error",
+                "-ss", str(seek_time),
+                "-i", video_path,
+                "-vframes", "1",
+                "-f", "null",
+                "-"
+            ], capture_output=True, timeout=12, check=False)
+            if result.returncode != 0:
+                return False
+        except:
+            return False
+
+    return True
 
 def get_thumb_b64(video_path: str) -> str:
     thumb_path = generate_thumbnail(video_path)
