@@ -37,7 +37,7 @@ CLIPBOARD_CYCLE_DELAY_SEC = 3.0
 CLIPBOARD_COPY_RETRIES    = 3
 CLIPBOARD_RETRY_DELAY_SEC = 0.8
 
-MAX_BATCH_SIZE     = 5
+MAX_BATCH_SIZE     = 3
 EXTRACTION_WORKERS = 3   # Parallel ffmpeg extractions
 API_WORKERS        = 3   # Parallel OpenAI API calls (safe for GPT-4o rate limits)
 NUM_FRAMES         = 4   # Extract 4 frames per video
