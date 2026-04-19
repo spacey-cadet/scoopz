@@ -667,16 +667,12 @@ PLATFORM_TAGS = {
 }
 
 GENERAL_VIRAL_POOL = [
-    "wtfmoment", "thisiswild", "crazy", "foryou", "trending", "awkward", "watch", "reaction", "relatable",
+    "wtfmoment", "awkward", "watch", "reaction", "relatable", "breakingnews", "local",
     "funny" , "messy", "unreal", "mindblown", "chaosmode", "unexpected", "outofpocket", "wildenergy"
 ]
 
 MANDATORY_GENERAL_TAGS = ["scoopz", "funny", "foryou", "trending"]
 
-REACTION_TAGS = {
-    "wtfmoment", "thisiswild", "whatdidijustwatch", "peoplearecrazy",
-    "nooneisready", "cantlookaway", "messy", "unreal", "mindblown", "chaosmode", "unexpected", "outofpocket", "wildenergy"
-}
 
 GENERAL_HINT_TOKENS = {
     "wtf", "wild", "crazy", "awkward", "watch", "reaction", "chaos", "messy", "relatable",
@@ -708,7 +704,7 @@ _STOPWORDS = {
 }
 
 _TYPO_MAP = {
-    "loclanews": "localnews",
+    "localanews": "localnews",
 }
 
 
@@ -764,12 +760,12 @@ def normalize_hashtags(hashtags_text: str, caption: str, transcript: str) -> str
             extracted.append(tag)
 
     video_specific = [t for t in extracted if not _is_general_viral_tag(t)]
-    reaction_tags  = [t for t in extracted if t in REACTION_TAGS]
+    reaction_tags  = []
 
     # Derive video-specific tags if none came from the model.
     if not video_specific:
         for t in _derive_video_specific_tags(caption, transcript):
-            if t not in video_specific and t not in reaction_tags:
+            if t not in video_specific:
                 video_specific.append(t)
             if video_specific:
                 break
@@ -780,29 +776,19 @@ def normalize_hashtags(hashtags_text: str, caption: str, transcript: str) -> str
     shift = seed % len(pool) if pool else 0
     pool  = pool[shift:] + pool[:shift]
 
-    for t in pool:
-        if t in REACTION_TAGS and t not in reaction_tags and t not in video_specific:
-            reaction_tags.append(t)
-        if len(reaction_tags) >= 2:
-            break
+
 
     if _looks_like_breaking_story(caption, transcript) and not video_specific:
         video_specific.append("breakingnews")
 
-    # Build exact recipe: 4 mandatory general + 2 reaction + 1 video-specific.
-    final = MANDATORY_GENERAL_TAGS[:] + reaction_tags[:2] + video_specific[:1]
+    # Build exact recipe: 4 mandatory general + up to 3 video-specific (max 7).
+    final = MANDATORY_GENERAL_TAGS[:] + video_specific[:3]
     deduped: List[str] = []
     for t in final:
         if t and t not in deduped and t not in PLATFORM_TAGS:
             deduped.append(t)
 
-    # Fill missing reaction slots if dedupe removed entries.
-    if sum(1 for t in deduped if t in REACTION_TAGS) < 2:
-        for t in pool:
-            if t in REACTION_TAGS and t not in deduped:
-                deduped.append(t)
-            if sum(1 for x in deduped if x in REACTION_TAGS) >= 2:
-                break
+
 
     # Guarantee at least one video-specific tag.
     if not any(not _is_general_viral_tag(t) and t not in MANDATORY_GENERAL_TAGS for t in deduped):
