@@ -56,7 +56,7 @@ FRAME_WEIGHT     = float(os.environ.get("SCOOPZ_FRAME_WEIGHT", "0.35"))
 TRANSCRIBE_AUDIO = os.environ.get("SCOOPZ_TRANSCRIBE_AUDIO", "1") != "0"
 POV_STATE_FILE   = os.path.expanduser("~/.cache/scoopz_pov.json")
 # ─────────────────────────────────────────────────────────
-
+ 
 
 @dataclass
 class ExtractionResult:
@@ -667,15 +667,15 @@ PLATFORM_TAGS = {
 }
 
 GENERAL_VIRAL_POOL = [
-    "wtfmoment", "thisiswild", "whatdidijustwatch", "peoplearecrazy",
-    "nooneisready", "thisissoawkward", "notokay", "cantlookaway", "messy",
+    "wtfmoment", "thisiswild", "crazy", "foryou", "trending", "awkward", "watch", "reaction", "relatable",
+    "funny" , "messy", "unreal", "mindblown", "chaosmode", "unexpected", "outofpocket", "wildenergy"
 ]
 
 MANDATORY_GENERAL_TAGS = ["scoopz", "funny", "foryou", "trending"]
 
 REACTION_TAGS = {
     "wtfmoment", "thisiswild", "whatdidijustwatch", "peoplearecrazy",
-    "nooneisready", "thisissoawkward", "notokay", "cantlookaway", "messy",
+    "nooneisready", "cantlookaway", "messy", "unreal", "mindblown", "chaosmode", "unexpected", "outofpocket", "wildenergy"
 }
 
 GENERAL_HINT_TOKENS = {
