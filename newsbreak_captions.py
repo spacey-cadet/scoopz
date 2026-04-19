@@ -37,7 +37,7 @@ CLIPBOARD_CYCLE_DELAY_SEC = 3.0
 CLIPBOARD_COPY_RETRIES    = 3
 CLIPBOARD_RETRY_DELAY_SEC = 0.8
 
-MAX_BATCH_SIZE     = 3
+MAX_BATCH_SIZE     = 7
 EXTRACTION_WORKERS = 3   # Parallel ffmpeg extractions
 API_WORKERS        = 3   # Parallel OpenAI API calls (safe for GPT-4o rate limits)
 NUM_FRAMES         = 4   # Extract 4 frames per video
@@ -947,6 +947,12 @@ def generate_caption_openai(
 
 
 # ── Batch Processing ───────────────────────────────────────
+def get_default_caption_and_hashtags():
+    # Universal, catchy fallback caption and hashtags
+    caption = "Somebody just changed the story 😳 What would you do next?"
+    hashtags = "#scoopz #trending #foryou #funny #wtfmoment #unexpected #localnews"
+    return caption, hashtags
+
 def process_batch(job_id: str, video_paths: List[str], api_key: str):
     """Process batch with parallel extraction AND parallel API calls."""
     try:
@@ -1003,11 +1009,16 @@ def process_batch(job_id: str, video_paths: List[str], api_key: str):
         final_results: List[Optional[CaptionResult]] = [None] * len(extraction_results)
         pov_modes = allocate_pov_modes(len(extraction_results))
 
+
         def generate_single_caption(idx: int, extraction: Optional[ExtractionResult]):
             if extraction is None:
-                return idx, CaptionResult(video_name="", caption="", hashtags="", error="Missing extraction result")
+                # Use default caption for missing extraction
+                caption, hashtags = get_default_caption_and_hashtags()
+                return idx, CaptionResult(video_name="", caption=caption, hashtags=hashtags, error=None)
             if extraction.error:
-                return idx, CaptionResult(video_name=extraction.video_name, caption="", hashtags="", error=extraction.error)
+                # Use default caption for extraction error
+                caption, hashtags = get_default_caption_and_hashtags()
+                return idx, CaptionResult(video_name=extraction.video_name, caption=caption, hashtags=hashtags, error=None)
 
             pov_mode   = pov_modes[idx] if idx < len(pov_modes) else "THIRD PERSON"
             style_mode = CAPTION_STYLE_MODES[idx % len(CAPTION_STYLE_MODES)]
@@ -1035,11 +1046,13 @@ def process_batch(job_id: str, video_paths: List[str], api_key: str):
                 )
             except Exception as e:
                 print(f"  ✗ Caption generation failed for {extraction.video_name}: {e}")
+                # Use default caption for generation error
+                caption, hashtags = get_default_caption_and_hashtags()
                 return idx, CaptionResult(
                     video_name=extraction.video_name,
-                    caption="",
-                    hashtags="",
-                    error=str(e),
+                    caption=caption,
+                    hashtags=hashtags,
+                    error=None,
                 )
 
         with ThreadPoolExecutor(max_workers=API_WORKERS) as executor:
