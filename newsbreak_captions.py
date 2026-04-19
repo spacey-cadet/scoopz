@@ -359,17 +359,31 @@ def load_videos() -> List[str]:
         existing.sort(key=lambda x: os.path.getmtime(x), reverse=True)
         prune_thumbnail_cache(existing)
 
+        # Filter out black/blank/corrupt videos: zero duration or very small size (<32KB)
+        valid_videos = []
+        skipped = 0
+        for f in existing:
+            try:
+                size_ok = os.path.getsize(f) > 32 * 1024
+                duration_ok = get_video_duration(f) > 0.5
+                if size_ok and duration_ok:
+                    valid_videos.append(f)
+                else:
+                    skipped += 1
+            except Exception:
+                skipped += 1
+
         LAST_DISCOVERY["existing"] = len(existing)
         LAST_DISCOVERY["eligible"] = 0
-        LAST_DISCOVERY["skipped"]  = 0
+        LAST_DISCOVERY["skipped"]  = skipped
 
         if not REQUIRE_VALID_THUMBNAIL:
-            LAST_DISCOVERY["eligible"] = len(existing)
-            return existing
+            LAST_DISCOVERY["eligible"] = len(valid_videos)
+            return valid_videos
 
         filtered = []
-        skipped  = 0
-        for video_path in existing:
+        thumb_skipped = 0
+        for video_path in valid_videos:
             thumb    = generate_thumbnail(video_path)
             frame_ok = True
             if REQUIRE_PICKER_FRAME_GATE:
@@ -377,14 +391,14 @@ def load_videos() -> List[str]:
             if thumb and frame_ok:
                 filtered.append(video_path)
             else:
-                skipped += 1
+                thumb_skipped += 1
 
-        if skipped:
+        if skipped or thumb_skipped:
             label = "thumbnail/frame extraction" if REQUIRE_PICKER_FRAME_GATE else "thumbnail"
-            print(f"⚠ Skipped {skipped} videos with no valid {label}")
+            print(f"⚠ Skipped {skipped} videos with bad file (size/duration) and {thumb_skipped} with no valid {label}")
 
         LAST_DISCOVERY["eligible"] = len(filtered)
-        LAST_DISCOVERY["skipped"]  = skipped
+        LAST_DISCOVERY["skipped"]  = skipped + thumb_skipped
         return filtered
 
     except Exception:
