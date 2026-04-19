@@ -45,6 +45,7 @@ NUM_FRAMES         = 4  # Extract 4 frames per video
 PORT               = 8765
 EXTRACT_AUDIO      = True
 REQUIRE_VALID_THUMBNAIL = True  # Hide videos that cannot produce a thumbnail.
+REQUIRE_PICKER_FRAME_GATE = os.environ.get("SCOOPZ_REQUIRE_PICKER_FRAME_GATE", "0") == "1"
 THUMB_MAX_FILES = int(os.environ.get("SCOOPZ_THUMB_MAX_FILES", "500"))
 THUMB_MAX_MB = int(os.environ.get("SCOOPZ_THUMB_MAX_MB", "120"))
 THUMB_MAX_AGE_DAYS = int(os.environ.get("SCOOPZ_THUMB_MAX_AGE_DAYS", "30"))
@@ -377,13 +378,20 @@ def load_videos() -> List[str]:
         skipped = 0
         for video_path in existing:
             thumb = generate_thumbnail(video_path)
-            if thumb and can_extract_picker_frames(video_path):
+            frame_ok = True
+            if REQUIRE_PICKER_FRAME_GATE:
+                frame_ok = can_extract_picker_frames(video_path)
+
+            if thumb and frame_ok:
                 filtered.append(video_path)
             else:
                 skipped += 1
 
         if skipped:
-            print(f"⚠ Skipped {skipped} videos with no valid thumbnail/frame extraction")
+            if REQUIRE_PICKER_FRAME_GATE:
+                print(f"⚠ Skipped {skipped} videos with no valid thumbnail/frame extraction")
+            else:
+                print(f"⚠ Skipped {skipped} videos with no valid thumbnail")
 
         LAST_DISCOVERY["eligible"] = len(filtered)
         LAST_DISCOVERY["skipped"] = skipped

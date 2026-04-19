@@ -282,29 +282,55 @@ class ScoopzCollector:
         return THUMB_DIR / f"{video_path.name}.jpg"
 
     def _fetch_sidecar_thumbnail(self, metadata: VideoMetadata, video_path: Path):
-        if not SAVE_API_THUMBNAILS:
-            return
-        thumb_url = (metadata.thumb_url or "").strip()
-        if not thumb_url:
-            return
-
+        """
+        Try to fetch API thumbnail. If unavailable or fails, extract frame using ffmpeg.
+        """
         thumb_path = self._sidecar_thumb_path(video_path)
-        try:
-            with requests.get(thumb_url, stream=True, timeout=12) as resp:
-                resp.raise_for_status()
-                ctype = (resp.headers.get("Content-Type") or "").lower()
-                if ctype and "image" not in ctype:
-                    return
+        thumb_saved = False
 
+        if SAVE_API_THUMBNAILS:
+            thumb_url = (metadata.thumb_url or "").strip()
+            if thumb_url:
+                try:
+                    with requests.get(thumb_url, stream=True, timeout=12) as resp:
+                        resp.raise_for_status()
+                        ctype = (resp.headers.get("Content-Type") or "").lower()
+                        if ctype and "image" not in ctype:
+                            raise Exception("Not an image")
+
+                        tmp = thumb_path.with_suffix(".jpg.part")
+                        with open(tmp, "wb") as f:
+                            shutil.copyfileobj(resp.raw, f)
+                        if tmp.exists() and tmp.stat().st_size > 500:
+                            tmp.replace(thumb_path)
+                            thumb_saved = True
+                        else:
+                            tmp.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        # Fallback: extract frame with ffmpeg if no valid API thumb
+        if not thumb_saved:
+            try:
                 tmp = thumb_path.with_suffix(".jpg.part")
-                with open(tmp, "wb") as f:
-                    shutil.copyfileobj(resp.raw, f)
+                # Extract frame at 1s (or 0.5s if short video)
+                cmd = [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-ss", "1", "-i", str(video_path),
+                    "-frames:v", "1", str(tmp)
+                ]
+                result = subprocess.run(cmd, capture_output=True, timeout=10)
                 if tmp.exists() and tmp.stat().st_size > 500:
                     tmp.replace(thumb_path)
                 else:
                     tmp.unlink(missing_ok=True)
-        except Exception:
-            pass
+            except Exception as e:
+                # Optionally log ffmpeg errors
+                try:
+                    with open(LOG_FILE, "a") as f:
+                        f.write(f"[thumb-fail] {video_path.name}: ffmpeg error: {e}\n")
+                except Exception:
+                    pass
 
     def _prune_thumb_cache(self):
         try:
