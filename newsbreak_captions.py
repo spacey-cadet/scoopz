@@ -685,7 +685,7 @@ GENERAL_VIRAL_POOL = [
     "funny" , "messy", "unreal", "mindblown", "chaosmode", "unexpected", "outofpocket", "wildenergy"
 ]
 
-MANDATORY_GENERAL_TAGS = ["scoopz", "funny", "foryou", "trending"]
+MANDATORY_GENERAL_TAGS = ["scoopz", "funny", "trending","scoopzfirst"]
 
 
 GENERAL_HINT_TOKENS = {
