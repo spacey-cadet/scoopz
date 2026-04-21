@@ -964,7 +964,7 @@ def generate_caption_openai(
 def get_default_caption_and_hashtags():
     # Universal, catchy fallback caption and hashtags
     caption = "Somebody just changed the story 😳 What would you do next?"
-    hashtags = "#scoopz #trending #foryou #funny #wtfmoment #unexpected #localnews"
+    hashtags = "#scoopz #trending #scoopzfirst #funny #wtfmoment #unexpected #localnews"
     return caption, hashtags
 
 def process_batch(job_id: str, video_paths: List[str], api_key: str):
