@@ -611,6 +611,7 @@ REQUIREMENTS:
 - Include at least one specific anchor detail (exact phrase/object/action) that clearly ties caption to this video
 - Strongly evoke at least one: outrage, suspicion, disbelief, urgency, or moral tension
 - Use pattern interruption — reframe the obvious in an unexpected way (see examples below)
+- Ensure any names mentioned in the transcipt or visible in frames are included in the caption for maximum specificity and searchability.
 - Do NOT narrate calmly or describe scenery like a recap
 
 PATTERN INTERRUPTION EXAMPLES:
