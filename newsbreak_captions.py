@@ -604,8 +604,8 @@ GOAL:
 - It should feel like something a real person texted their friend, not a content writer.
 
 REQUIREMENTS:
-- No more than 130 characters total
-- 1-2 sentences.
+- No more than 100 characters total
+- 1 sentences.
 - 2-3 emojis total (distributed naturally, never clustered at the end)
 - Must hook instantly (conflict, accusation, shock, stakes, or challenge)and  escalate tension and force a reaction (question, judgment, or dare)
 - Include at least one specific anchor detail (exact phrase/object/action) that clearly ties caption to this video
