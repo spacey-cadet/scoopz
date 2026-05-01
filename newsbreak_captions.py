@@ -599,6 +599,7 @@ CONTEXT: You're seeing {num_frames} frames across the video (beginning, early-mi
 Use progression only to infer tension/reveals; never mention frame order explicitly.
 
 GOAL:
+- Sound crazy, or out of pocket
 - Ground it in ONE specific detail from THIS video — an exact action, quote, object, or reaction visible or heard.
 - Make it universally relatable — a judgment, question, or dare that anyone scrolling can instantly react to.
 - It should feel like something a real person texted their friend, not a content writer.
