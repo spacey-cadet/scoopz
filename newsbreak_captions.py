@@ -599,16 +599,15 @@ CONTEXT: You're seeing {num_frames} frames across the video (beginning, early-mi
 Use progression only to infer tension/reveals; never mention frame order explicitly.
 
 GOAL:
-- Sentence 1: Ground it in ONE specific detail from THIS video — an exact action, quote, object, or reaction visible or heard.
-- Sentence 2: Make it universally relatable — a judgment, question, or dare that anyone scrolling can instantly react to.
-- Both sentences together should feel like something a real person texted their friend, not a content writer.
+- Ground it in ONE specific detail from THIS video — an exact action, quote, object, or reaction visible or heard.
+- Make it universally relatable — a judgment, question, or dare that anyone scrolling can instantly react to.
+- It should feel like something a real person texted their friend, not a content writer.
 
 REQUIREMENTS:
-- No more than 162 characters total
-- 2 sentences exactly
+- No more than 130 characters total
+- 1-2 sentences.
 - 2-3 emojis total (distributed naturally, never clustered at the end)
-- Sentence 1 must hook instantly (conflict, accusation, shock, stakes, or challenge)
-- Sentence 2 must escalate tension and force a reaction (question, judgment, or dare)
+- Must hook instantly (conflict, accusation, shock, stakes, or challenge)and  escalate tension and force a reaction (question, judgment, or dare)
 - Include at least one specific anchor detail (exact phrase/object/action) that clearly ties caption to this video
 - Strongly evoke at least one: outrage, suspicion, disbelief, urgency, or moral tension
 - Use pattern interruption — reframe the obvious in an unexpected way (see examples below)
