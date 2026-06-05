@@ -427,6 +427,7 @@ class ScoopzCollector:
 
                 if success:
                     print(f"✓ {filename} in {elapsed:.1f}s", flush=True)
+                    print("─" * 50, flush=True)
                     try:
                         subprocess.run(
                             ["termux-media-scan", str(output_path)],
