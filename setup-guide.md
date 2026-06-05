@@ -106,7 +106,7 @@ What happens:
 - Script scans /sdcard/Pictures/scoopz for mp4 files.
 - Generates thumbnails in /sdcard/Pictures/scoopz/.thumbs.
 - Starts local picker on 127.0.0.1:8765.
-- You select 1 to 3 videos and tap GO.
+- You select upto videos and tap GO.
 - For each selected video, ffmpeg extracts 4 frames.
 - Captions are generated in parallel using OpenAI.
 - When done, captions are shown in-page; tap Copy on the caption you want while posting.
