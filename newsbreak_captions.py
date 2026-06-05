@@ -207,6 +207,7 @@ def auto_cycle_clipboard(job_id: str, results: List[CaptionResult]) -> Dict[str,
     """Copy captions one-by-one to clipboard with a delay.
     Intended to populate Android clipboard history.
     """
+    copy_start     = time.time()
     total          = len(results)
     copied         = 0
     failed_indices: List[int] = []
@@ -229,19 +230,27 @@ def auto_cycle_clipboard(job_id: str, results: List[CaptionResult]) -> Dict[str,
         # Give clipboard history time to register each entry.
         time.sleep(CLIPBOARD_CYCLE_DELAY_SEC)
 
+    copy_elapsed = time.time() - copy_start
+
+    with jobs_lock:
+        if job_id in processing_jobs:
+            processing_jobs[job_id]["clipboard_time_sec"] = copy_elapsed
+
+    avg_per = copy_elapsed / total if total else 0
     if failed_indices:
         notify(
             "Batch Complete (Partial)",
-            f"Copied {copied}/{total}. Failed: {','.join(str(x) for x in failed_indices)}",
+            f"Copied {copied}/{total}. Failed: {','.join(str(x) for x in failed_indices)}. Clipboard: {copy_elapsed:.1f}s (~{avg_per:.1f}s/video)",
             "scoopz_batch",
         )
     else:
-        notify("Batch Complete", f"Copied {total}/{total} captions to clipboard", "scoopz_batch")
+        notify("Batch Complete", f"Copied {total}/{total} captions to clipboard in {copy_elapsed:.1f}s (~{avg_per:.1f}s/video)", "scoopz_batch")
 
     return {
         "copied": copied,
         "failed": len(failed_indices),
         "failed_indices": failed_indices,
+        "clipboard_time_sec": copy_elapsed,
     }
 
 
@@ -1011,11 +1020,11 @@ def process_batch(job_id: str, video_paths: List[str], api_key: str):
                     )
 
         extraction_time = time.time() - extraction_start
-        print(f"✓ Extraction complete: {extraction_time:.1f}s")
+        print(f"✓ Extraction complete: {extraction_time:.1f}s ({extraction_time / len(video_paths):.1f}s per video)")
 
         # ── Phase 2: Generate captions ───────────────────────
         print(f"\n🤖 Phase 2: Generating captions (parallel, {API_WORKERS} workers)...")
-        generation_start = time.time()
+        api_start = time.time()
 
         with jobs_lock:
             processing_jobs[job_id]["status"]    = "generating"
@@ -1094,10 +1103,10 @@ def process_batch(job_id: str, video_paths: List[str], api_key: str):
                         1 for r in final_results if r is not None
                     )
 
-        generation_time = time.time() - generation_start
-        print(f"✓ Caption generation complete: {generation_time:.1f}s")
+        api_elapsed = time.time() - api_start
+        print(f"✓ Caption generation complete: {api_elapsed:.1f}s ({api_elapsed / len(video_paths):.1f}s per video)")
 
-        total_time = extraction_time + generation_time
+        total_time = extraction_time + api_elapsed
         print(f"\n🎯 Total time: {total_time:.1f}s ({total_time / len(video_paths):.1f}s per video)")
 
         # Ensure no Nones remain in final_results.

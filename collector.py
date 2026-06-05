@@ -97,6 +97,7 @@ class DownloadStats:
     failed: int = 0
     active: int = 0
     queued: int = 0
+    start_time: float = field(default_factory=time.time)
 
 
 class TikWMClient:
@@ -248,12 +249,16 @@ class ScoopzCollector:
 
     def _update_ui(self):
         self.stats.queued = self.queue.qsize()
+        elapsed = time.time() - self.stats.start_time
+        avg = elapsed / self.stats.downloaded if self.stats.downloaded else 0
         status = (
             f"A:{self.stats.active} "
             f"D:{self.stats.downloaded} "
             f"S:{self.stats.skipped} "
             f"F:{self.stats.failed} "
             f"Q:{self.stats.queued}"
+            f" | {elapsed:.0f}s"
+            f" | avg {avg:.1f}s/video"
         )
 
         if USE_ANSI_STATUS:
@@ -416,9 +421,12 @@ class ScoopzCollector:
 
                 filename = self._build_filename(metadata)
                 output_path = EXPORT_DIR / filename
+                t0 = time.time()
                 success, reason = await asyncio.to_thread(self.downloader.download, metadata, output_path)
+                elapsed = time.time() - t0
 
                 if success:
+                    print(f"✓ {filename} in {elapsed:.1f}s", flush=True)
                     try:
                         subprocess.run(
                             ["termux-media-scan", str(output_path)],
@@ -466,7 +474,13 @@ def main():
         collector = ScoopzCollector()
         asyncio.run(collector.run())
     except KeyboardInterrupt:
-        print("\n\nStopped.\n")
+        total_time = time.time() - collector.stats.start_time
+        total_videos = collector.stats.downloaded
+        avg = total_time / total_videos if total_videos else 0
+        print(f"\n\nStopped.")
+        print(f"Videos downloaded : {total_videos}")
+        print(f"Total time        : {total_time:.1f}s")
+        print(f"Average per video : {avg:.1f}s\n")
         sys.exit(0)
 
 
