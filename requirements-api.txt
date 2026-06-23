@@ -1,2 +1,6 @@
-fastapi
-uvicorn[standard]
+# Termux-friendly pins: keep the stack pure-Python where possible.
+# Avoid uvicorn[standard] (watchfiles/uvloop) and FastAPI releases that require
+# pydantic v2 / pydantic-core builds on Android.
+fastapi==0.97.0
+pydantic==1.10.24
+uvicorn==0.22.0

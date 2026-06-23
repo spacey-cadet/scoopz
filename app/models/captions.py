@@ -13,7 +13,7 @@ class CaptionJobState(str, Enum):
 
 
 class CaptionJobCreate(BaseModel):
-    video_ids: list[str] = Field(..., min_length=1, max_length=7)
+    video_ids: list[str] = Field(..., min_items=1, max_items=7)
     prompt: str | None = None
 
 
