@@ -1,2 +1,4 @@
 fastapi
+# Termux-safe: avoid uvicorn[standard], which pulls Rust/C-extension extras
+# like watchfiles and uvloop that often fail to build on Android.
 uvicorn
