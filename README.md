@@ -7,6 +7,72 @@ Scoopz is a two-script Termux workflow for Android that watches a link inbox, do
 - **`collector.py`** — watches a link inbox file and downloads TikTok videos to `/sdcard/Pictures/scoopz`
 - **`newsbreak_captions.py`** — opens a local thumbnail picker, lets you select up to 3 videos, and generates captions in parallel
 - **`scoopz_env.sh`** — adds shortcut commands (`collect`, `caption`, `scoopz-help`) to your shell
+- **`app/`** — FastAPI scaffold for exposing the collector, video library, and caption workflow over HTTP
+
+---
+
+## FastAPI Scaffold
+
+The API scaffold is intentionally thin: it defines the router layout, dependency injection points, Pydantic models, and lightweight services that can be wired into the existing scripts as the backend matures.
+
+```bash
+pip install -r requirements-api.txt
+```
+
+Default API prefix: `http://127.0.0.1:8000/api/v1`
+
+When `scoopz_env.sh` is sourced, the API runs from Termux with the same project and media paths as the existing scripts. The normal workflow commands manage the API automatically:
+
+```bash
+collect      # starts the API, runs collector.py, stops its managed API on exit
+caption      # starts the API, runs newsbreak_captions.py, stops its managed API on exit
+caption-bg   # starts caption generator and API in the background
+caption-stop # stops the background caption generator and its managed API
+```
+
+Manual API commands are still available for debugging or standalone use:
+
+```bash
+scoopz-api        # foreground server
+scoopz-api-bg     # background server, logs to logs/api.log
+scoopz-api-stop   # stop background server
+scoopz-api-logs   # follow API logs
+scoopz-api-open   # open API docs when termux-open-url is available
+```
+
+Override the bind address when needed:
+
+```bash
+export SCOOPZ_API_HOST=0.0.0.0
+export SCOOPZ_API_PORT=8000
+scoopz-api-bg
+```
+
+```text
+app/
+  main.py                 # FastAPI app factory
+  api/
+    deps.py               # Dependency providers
+    router.py             # v1 router composition
+    routes/               # Health, collector, videos, captions routes
+  core/
+    config.py             # Environment-driven settings
+  models/                 # Pydantic request/response models
+  services/               # Thin service layer behind route handlers
+```
+
+Initial endpoints:
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/api/v1/health` | Health check |
+| `GET` | `/api/v1/collector/state` | Inbox/history counts |
+| `POST` | `/api/v1/collector/links` | Append links to the collector inbox |
+| `GET` | `/api/v1/videos` | List downloaded `.mp4` files |
+| `GET` | `/api/v1/videos/{video_id}` | Read one video record |
+| `POST` | `/api/v1/captions/jobs` | Queue a placeholder caption job |
+| `GET` | `/api/v1/captions/jobs/{job_id}` | Read a caption job |
+| `GET` | `/api/v1/captions/jobs/{job_id}/status` | Read caption job status |
 
 ---
 

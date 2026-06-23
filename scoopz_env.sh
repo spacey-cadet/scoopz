@@ -14,6 +14,11 @@ export SCOOPZ_MEDIA_DIR="${SCOOPZ_MEDIA_DIR:-/sdcard/Pictures/scoopz}"
 # Keep SCOOPZ_DIR for script compatibility (media path)
 export SCOOPZ_DIR="$SCOOPZ_MEDIA_DIR"
 
+# FastAPI app defaults (served from Termux unless overridden)
+export SCOOPZ_API_HOST="${SCOOPZ_API_HOST:-127.0.0.1}"
+export SCOOPZ_API_PORT="${SCOOPZ_API_PORT:-8000}"
+export SCOOPZ_API_URL="http://$SCOOPZ_API_HOST:$SCOOPZ_API_PORT"
+
 # ── Config files (Termux) ───────────────────────────────────────────────────
 SCOOPZ_CONFIG_DIR="$HOME/.config/scoopz"
 SCOOPZ_REMOTE_URL_FILE="$SCOOPZ_CONFIG_DIR/remote_url.txt"
@@ -130,10 +135,93 @@ scoopz-remote-auto() {
     return 1
 }
 
+# ── FastAPI lifecycle helpers ────────────────────────────────────────────────
+_scoopz_api_is_running() {
+    pgrep -f "uvicorn app.main:app" >/dev/null 2>&1
+}
+
+_scoopz_api_require_ready() {
+    if [ ! -f "app/main.py" ]; then
+        echo "⚠️  app/main.py not found in $SCOOPZ_APP_DIR"
+        return 1
+    fi
+
+    if ! python -c "import fastapi, uvicorn" >/dev/null 2>&1; then
+        echo "⚠️  FastAPI dependencies missing. Run: pip install -r requirements-api.txt"
+        return 1
+    fi
+}
+
+_scoopz_api_start_for_workflow() {
+    SCOOPZ_STARTED_API_PID=""
+
+    if _scoopz_api_is_running; then
+        echo "🚀 Scoopz API already running at $SCOOPZ_API_URL"
+        return 0
+    fi
+
+    _scoopz_api_require_ready || return 1
+    mkdir -p logs
+
+    nohup python -m uvicorn app.main:app --host "$SCOOPZ_API_HOST" --port "$SCOOPZ_API_PORT" > logs/api.log 2>&1 &
+    SCOOPZ_STARTED_API_PID=$!
+
+    sleep 1
+    if ! kill -0 "$SCOOPZ_STARTED_API_PID" >/dev/null 2>&1; then
+        echo "⚠️  Scoopz API failed to start. Check: scoopz-api-logs"
+        SCOOPZ_STARTED_API_PID=""
+        return 1
+    fi
+
+    echo "🚀 Scoopz API started at $SCOOPZ_API_URL/api/v1 (PID: $SCOOPZ_STARTED_API_PID)"
+}
+
+_scoopz_api_stop_for_workflow() {
+    local pid="$1"
+    if [ -z "$pid" ]; then
+        return 0
+    fi
+
+    if kill -0 "$pid" >/dev/null 2>&1; then
+        kill "$pid" >/dev/null 2>&1 || true
+        wait "$pid" 2>/dev/null || true
+        echo "🛑 Stopped Scoopz API (PID: $pid)"
+    fi
+}
+
+_scoopz_run_with_api() (
+    _scoopz_api_start_for_workflow || exit 1
+    local api_pid="$SCOOPZ_STARTED_API_PID"
+    local child_pid=""
+
+    _scoopz_workflow_cleanup() {
+        if [ -n "$child_pid" ] && kill -0 "$child_pid" >/dev/null 2>&1; then
+            kill "$child_pid" >/dev/null 2>&1 || true
+            wait "$child_pid" 2>/dev/null || true
+        fi
+        _scoopz_api_stop_for_workflow "$api_pid"
+    }
+
+    trap '_scoopz_workflow_cleanup' EXIT
+    trap '_scoopz_workflow_cleanup; exit 130' INT
+    trap '_scoopz_workflow_cleanup; exit 143' TERM
+
+    "$@" &
+    child_pid=$!
+    wait "$child_pid"
+)
+
 # ── collect ───────────────────────────────────────────────────────────────────
 collect() {
     echo "📋 Starting collector — browse TikTok and Share → Copy Link"
-    cd "$SCOOPZ_APP_DIR" && python collector.py
+    cd "$SCOOPZ_APP_DIR" || return 1
+
+    if [ ! -f "collector.py" ]; then
+        echo "⚠️  collector.py not found in $SCOOPZ_APP_DIR"
+        return 1
+    fi
+
+    _scoopz_run_with_api python collector.py
 }
 
 # ── NewsBreak Caption Generator ──────────────────────────────────────────────
@@ -146,7 +234,7 @@ caption() {
         return 1
     fi
     
-    python newsbreak_captions.py
+    _scoopz_run_with_api python newsbreak_captions.py
 }
 
 caption-bg() {
@@ -160,7 +248,7 @@ caption-bg() {
     
     mkdir -p logs
     
-    nohup python newsbreak_captions.py > logs/captions.log 2>&1 &
+    nohup bash -c "source \"$SCOOPZ_APP_DIR/scoopz_env.sh\" >/dev/null 2>&1; cd \"$SCOOPZ_APP_DIR\" && _scoopz_run_with_api python newsbreak_captions.py" > logs/captions.log 2>&1 &
     local pid=$!
     echo "✅ Caption generator running (PID: $pid)"
     echo "   Tap the notification to open video picker"
@@ -176,6 +264,64 @@ caption-logs() {
     tail -f "$SCOOPZ_APP_DIR/logs/captions.log"
 }
 
+# ── FastAPI App ──────────────────────────────────────────────────────────────
+scoopz-api() {
+    echo "🚀 Starting Scoopz API at $SCOOPZ_API_URL"
+    cd "$SCOOPZ_APP_DIR" || return 1
+
+    if [ ! -f "app/main.py" ]; then
+        echo "⚠️  app/main.py not found in $SCOOPZ_APP_DIR"
+        return 1
+    fi
+
+    if ! python -c "import fastapi, uvicorn" >/dev/null 2>&1; then
+        echo "⚠️  FastAPI dependencies missing. Run: pip install -r requirements-api.txt"
+        return 1
+    fi
+
+    python -m uvicorn app.main:app --host "$SCOOPZ_API_HOST" --port "$SCOOPZ_API_PORT"
+}
+
+scoopz-api-bg() {
+    echo "🚀 Starting Scoopz API in background at $SCOOPZ_API_URL"
+    cd "$SCOOPZ_APP_DIR" || return 1
+
+    if [ ! -f "app/main.py" ]; then
+        echo "⚠️  app/main.py not found in $SCOOPZ_APP_DIR"
+        return 1
+    fi
+
+    if ! python -c "import fastapi, uvicorn" >/dev/null 2>&1; then
+        echo "⚠️  FastAPI dependencies missing. Run: pip install -r requirements-api.txt"
+        return 1
+    fi
+
+    mkdir -p logs
+
+    nohup python -m uvicorn app.main:app --host "$SCOOPZ_API_HOST" --port "$SCOOPZ_API_PORT" > logs/api.log 2>&1 &
+    local pid=$!
+    echo "✅ Scoopz API running (PID: $pid)"
+    echo "   Local API: $SCOOPZ_API_URL/api/v1"
+    echo "   Docs:      $SCOOPZ_API_URL/docs"
+    echo "   Stop with: scoopz-api-stop or kill $pid"
+}
+
+scoopz-api-stop() {
+    pkill -f "uvicorn app.main:app"
+    echo "🛑 Stopped Scoopz API"
+}
+
+scoopz-api-logs() {
+    tail -f "$SCOOPZ_APP_DIR/logs/api.log"
+}
+
+scoopz-api-open() {
+    echo "$SCOOPZ_API_URL/docs"
+    if command -v termux-open-url >/dev/null 2>&1; then
+        termux-open-url "$SCOOPZ_API_URL/docs"
+    fi
+}
+
 # ── Status ────────────────────────────────────────────────────────────────────
 scoopz-status() {
     echo ""
@@ -188,6 +334,18 @@ scoopz-status() {
         local pid
         pid=$(pgrep -f "newsbreak_captions.py")
         echo "   Status: ✅ Running (PID: $pid)"
+    else
+        echo "   Status: ⚪ Not running"
+    fi
+
+    echo ""
+    echo "── FastAPI App ────────────────────────"
+    if pgrep -f "uvicorn app.main:app" > /dev/null; then
+        local api_pid
+        api_pid=$(pgrep -f "uvicorn app.main:app")
+        echo "   Status: ✅ Running (PID: $api_pid)"
+        echo "   API:    $SCOOPZ_API_URL/api/v1"
+        echo "   Docs:   $SCOOPZ_API_URL/docs"
     else
         echo "   Status: ⚪ Not running"
     fi
@@ -207,6 +365,11 @@ scoopz-status() {
     else
         echo "   No logs yet"
     fi
+
+    if [ -f "$SCOOPZ_APP_DIR/logs/api.log" ]; then
+        echo "   API log (last 3 lines):"
+        tail -3 "$SCOOPZ_APP_DIR/logs/api.log" 2>/dev/null || echo "   (empty)"
+    fi
     echo "══════════════════════════════════════"
 }
 
@@ -214,22 +377,29 @@ scoopz-status() {
 scoopz-help() {
     echo ""
     echo "  ── Collection ───────────────────────────────"
-    echo "  collect              TikTok link collector"
+    echo "  collect           Start collector + managed API"
     echo ""
     echo "  ── NewsBreak Captions ───────────────────────"
-    echo "  caption           Start caption generator (interactive)"
-    echo "  caption-bg        Start in background"
-    echo "  caption-stop      Stop background process"
+    echo "  caption           Start caption generator + managed API"
+    echo "  caption-bg        Start caption generator + API in background"
+    echo "  caption-stop      Stop background caption process"
     echo "  caption-logs      View logs"
+    echo ""
+    echo "  ── FastAPI App (manual/debug) ───────────────"
+    echo "  scoopz-api        Start only API server (interactive)"
+    echo "  scoopz-api-bg     Start only API server in background"
+    echo "  scoopz-api-stop   Stop API server"
+    echo "  scoopz-api-logs   View API logs"
+    echo "  scoopz-api-open   Open API docs URL"
     echo ""
     echo "  ── Status ───────────────────────────────────"
     echo "  scoopz-status        Check what's running"
     echo ""
     echo "  ── Workflow ─────────────────────────────────"
-    echo "  1. collect           ← browse TikTok, share links"
-    echo "  2. caption-bg     ← start caption generator"
+    echo "  1. collect        ← starts API, browse TikTok, share links"
+    echo "  2. caption-bg     ← starts API, start caption generator"
     echo "  3. tap notification  ← open picker, select videos"
-    echo "  4. caption-stop   ← when done"
+    echo "  4. caption-stop   ← stops caption generator and managed API"
     echo ""
 }
 
