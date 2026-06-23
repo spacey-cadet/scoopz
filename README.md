@@ -19,6 +19,10 @@ The API scaffold is intentionally thin: it defines the router layout, dependency
 pip install -r requirements-api.txt
 ```
 
+Those pins are chosen to stay friendly to Termux on Android; if you hit a build
+error, make sure you are using the repo's `requirements-api.txt` exactly as
+checked in and not `uvicorn[standard]`.
+
 Default API prefix: `http://127.0.0.1:8000/api/v1`
 
 When `scoopz_env.sh` is sourced, the API runs from Termux with the same project and media paths as the existing scripts. The normal workflow commands manage the API automatically:
