@@ -6,12 +6,10 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.scoopz.app.ScoopzApp
 import com.scoopz.app.data.CaptionState
-import com.scoopz.app.media.FrameStrip
+import com.scoopz.app.media.FramePicker
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
-import kotlinx.coroutines.withContext
 
 class CaptionWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ctx, params) {
 
@@ -22,13 +20,13 @@ class CaptionWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ct
         val video = dao.get(url) ?: return Result.failure()
         val uri = video.mediaUri?.let(Uri::parse) ?: return Result.failure()
 
-        // One caption at a time: keeps frame bitmaps to a single video and respects the rate limit.
+        // Up to 3 captions at once. Each finishes and shows on its own card as soon as it is ready.
         return gate.withPermit {
             try {
                 dao.setCaptionState(url, CaptionState.RUNNING)
-                val jpeg = withContext(Dispatchers.IO) { FrameStrip.build(applicationContext, uri) }
+                val picked = FramePicker.pick(applicationContext, uri)
                     ?: throw IllegalStateException("Could not read frames from video")
-                val result = g.captioner.caption(jpeg)
+                val result = g.captioner.caption(picked.jpeg, video.title, video.author, picked.onScreenText)
                 dao.setCaption(url, result.caption, result.hashtags)
                 Result.success()
             } catch (e: CancellationException) {
@@ -43,6 +41,6 @@ class CaptionWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ct
 
     companion object {
         const val KEY_URL = "url"
-        private val gate = Semaphore(1)
+        private val gate = Semaphore(3)
     }
 }

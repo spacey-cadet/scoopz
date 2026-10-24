@@ -19,7 +19,7 @@ Scoopz started as a Termux workflow (two Python scripts plus a share-sheet trick
 1. **Share** a TikTok link to *Scoopz* from any app's share sheet (or tap **+** to paste from the clipboard).
 2. The link is stored in a local Room database queue — no inbox file, no polling.
 3. A background **download worker** (WorkManager + foreground notification) resolves the link via tikwm and streams the mp4 into `Movies/Scoopz` through MediaStore. Up to 3 downloads run in parallel; duplicates are skipped by video id.
-4. A **caption worker** stitches 3 frames into one image and sends it to NVIDIA's free OpenAI-compatible endpoint. It applies the same prompt, POV/style rotation, caption cleanup and hashtag recipe as `newsbreak_captions.py`.
+4. A **caption worker** picks the 1-2 most informative frames on-device (sharpness, faces and on-screen text, using ML Kit) and sends them, with the TikTok title, uploader and any on-screen text, to NVIDIA's free OpenAI-compatible endpoint. Up to 3 captions run at once, and a backup model takes over if the main one is slow. It applies the same prompt, POV/style rotation, caption cleanup and hashtag recipe as `newsbreak_captions.py`.
 5. The **library screen** shows every video with status and thumbnail. Tap cards to select up to 3, then **Caption** or **Copy**. Failed items can be retried.
 
 ### Memory management
@@ -29,6 +29,39 @@ Scoopz started as a Termux workflow (two Python scripts plus a share-sheet trick
 - Thumbnail memory cache is capped at 12% of app memory; the disk cache at 64 MB.
 - Download and caption concurrency are bounded by semaphores, and API calls are spaced by a rate limiter.
 
+### Optimization techniques
+
+**Downloads**
+- Streamed to disk in 64 KB chunks and written straight into MediaStore (marked pending until complete), so a video is never held in RAM.
+- At most 3 downloads at once, behind a semaphore.
+- The same video shared under different links is detected by video id and reused instead of downloaded again.
+- Automatic retries with exponential backoff (up to 3 attempts), and a half-written file is deleted on failure or cancel.
+- Runs only when the network is connected, as expedited background work with a foreground notification, so Android doesn't kill it.
+- Progress notifications update every 10%, not on every chunk.
+- Unique work names per link, so double-sharing never queues the same download twice.
+
+**Captioning**
+- Frames are picked on the phone: 8 sampled, scored for sharpness, faces and on-screen text, and only the best 1-2 are sent, instead of sending every frame.
+- One full frame is decoded at a time, and at most 3 small bitmaps are held. Every bitmap is recycled as soon as it is used.
+- The stitched image is a 384 px-high JPEG in 16-bit colour whose quality is lowered until it is under ~140 KB, which keeps requests small and fast.
+- Short responses (`max_tokens` 300) and a request timeout of about 45 s.
+- A slow or failing model automatically falls back to the backup model instead of making you wait.
+- Up to 3 captions run in parallel. Each card updates on its own as soon as its caption is ready.
+- A rate limiter spaces requests to stay under the free tier's requests-per-minute cap, and a `429` response pauses all queued requests for the server's `Retry-After` time.
+- An alternative image format is tried automatically if a model rejects the first one.
+
+**Interface and storage**
+- The library list is lazy, keyed by video, and fed by a Room `Flow` that only runs while the screen is visible.
+- Thumbnails are decoded at 256 px, with the memory cache capped at 12% of app memory and the disk cache at 64 MB.
+- The API key lives in encrypted preferences (Android Keystore), and app backup is turned off so it never leaves the phone.
+- Release builds use R8 shrinking and resource shrinking to keep the APK small.
+- The share target is a transparent activity that queues the link and closes instantly, so sharing never interrupts what you are doing.
+
+**Planned**
+- Instant text-only draft captions from the TikTok title, with an optional vision upgrade.
+- A second free provider as a further fallback.
+- Audio transcription.
+
 ### Captioning with NVIDIA free endpoints
 
 1. Create a free key at <https://build.nvidia.com> (Settings → API Keys).
@@ -37,7 +70,8 @@ Scoopz started as a Termux workflow (two Python scripts plus a share-sheet trick
 
 Notes:
 - The free tier is roughly 40 requests/minute per key across all models. The app defaults to 30 (configurable, 1–40).
-- Free vision models take one image per request, hence the stitched frame strip.
+- Free vision models take one image per request, so the picked frames are stitched side by side (kept under ~140 KB).
+- Requests time out after about 45 s and are retried on the **backup model** (Settings). Names in captions come from the TikTok title, hashtags and on-screen text. The app never identifies people from faces.
 - If you get HTTP 403, open the model's page on build.nvidia.com and use *Try API* once to enable it for your key.
 - Audio transcription is not implemented (no free speech-to-text model found); captions use frames only.
 
@@ -87,7 +121,7 @@ android/
     data/                     # Room entities/DAO, encrypted Settings
     net/TikwmClient.kt        # Link -> direct mp4 URL
     work/                     # DownloadWorker, CaptionWorker, Enqueue helpers
-    media/FrameStrip.kt       # 3-frame contact sheet from a video
+    media/FramePicker.kt      # Picks the best 1-2 frames (ML Kit faces + text)
     caption/                  # NVIDIA client, prompt, POV/style rotation, hashtag rules, rate limiter
     ui/                       # Library + Settings screens, ViewModel
     util/LinkParser.kt        # Extract TikTok links from shared text
@@ -101,7 +135,7 @@ Key dependencies: Compose Material 3, Room, WorkManager, OkHttp, Coil (+ video f
 |--------|---------|
 | `collector.py` inbox polling | Share-sheet intent + Room queue (`ShareReceiverActivity`, `Enqueue`) |
 | tikwm download with retries | `TikwmClient` + `DownloadWorker` |
-| ffmpeg frame extraction | `MediaMetadataRetriever` in `FrameStrip` |
+| ffmpeg frame extraction | `MediaMetadataRetriever` in `FramePicker` |
 | `CAPTION_PROMPT`, POV rotation, `normalize_hashtags` | `CaptionPrompt`, `CaptionStyle`, `Hashtags` |
 | OpenAI gpt-4o | NVIDIA endpoint via `NvidiaCaptioner` |
 | Local thumbnail picker page | Compose library screen with selection |

@@ -7,7 +7,7 @@ Native Kotlin (Jetpack Compose) replacement for the Termux workflow. Share a lin
 1. **Share** a TikTok link to *Scoopz* from any app (or tap **+** to paste from the clipboard).
 2. `ShareReceiverActivity` parses the link, stores it in a Room queue and closes instantly.
 3. `DownloadWorker` (WorkManager, foreground notification) resolves the link via tikwm and streams the mp4 into `Movies/Scoopz` through MediaStore. Max 3 downloads in parallel, duplicates are skipped by video id.
-4. `CaptionWorker` builds a 3-frame contact sheet, sends it to NVIDIA's free OpenAI-compatible endpoint, and saves the caption plus hashtags. One caption at a time, rate-limited.
+4. `CaptionWorker` picks the 1-2 most informative frames on-device (sharpness, faces, on-screen text via ML Kit), sends them with the TikTok title, uploader and on-screen text to NVIDIA's free OpenAI-compatible endpoint, and saves the caption plus hashtags. Up to 3 captions run at once, rate-limited, with a backup model if the main one is slow.
 5. Library screen: tap cards to select (max 3), **Caption**, **Copy**, retry failures.
 
 ## Memory management
