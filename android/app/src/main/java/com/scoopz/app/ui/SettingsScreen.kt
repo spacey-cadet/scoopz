@@ -36,6 +36,7 @@ import com.scoopz.app.data.Settings
 fun SettingsScreen(onBack: () -> Unit) {
     val s = ScoopzApp.graph.settings
     var key by remember { mutableStateOf(s.apiKey) }
+    var backup by remember { mutableStateOf(s.backupModel) }
     var baseUrl by remember { mutableStateOf(s.baseUrl) }
     var model by remember { mutableStateOf(s.model) }
     var rpm by remember { mutableStateOf(s.requestsPerMinute.toString()) }
@@ -45,6 +46,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         s.apiKey = key
         s.baseUrl = baseUrl
         s.model = model
+        s.backupModel = backup
         s.requestsPerMinute = rpm.toIntOrNull() ?: 30
         s.autoCaption = auto
     }
@@ -75,6 +77,12 @@ fun SettingsScreen(onBack: () -> Unit) {
                 singleLine = true,
             )
             OutlinedTextField(
+                backup, { backup = it }, Modifier.fillMaxWidth(),
+                label = { Text("Backup vision model") },
+                supportingText = { Text("Used automatically if the main model is slow or fails. Blank = off") },
+                singleLine = true,
+            )
+            OutlinedTextField(
                 baseUrl, { baseUrl = it }, Modifier.fillMaxWidth(),
                 label = { Text("Base URL") }, singleLine = true,
             )
@@ -92,6 +100,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             TextButton(onClick = {
                 baseUrl = Settings.DEFAULT_BASE_URL
                 model = Settings.DEFAULT_MODEL
+                backup = Settings.DEFAULT_BACKUP_MODEL
             }) { Text("Reset endpoint and model to defaults") }
         }
     }

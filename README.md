@@ -19,7 +19,7 @@ Scoopz started as a Termux workflow (two Python scripts plus a share-sheet trick
 1. **Share** a TikTok link to *Scoopz* from any app's share sheet (or tap **+** to paste from the clipboard).
 2. The link is stored in a local Room database queue — no inbox file, no polling.
 3. A background **download worker** (WorkManager + foreground notification) resolves the link via tikwm and streams the mp4 into `Movies/Scoopz` through MediaStore. Up to 3 downloads run in parallel; duplicates are skipped by video id.
-4. A **caption worker** stitches 3 frames into one image and sends it to NVIDIA's free OpenAI-compatible endpoint. It applies the same prompt, POV/style rotation, caption cleanup and hashtag recipe as `newsbreak_captions.py`.
+4. A **caption worker** picks the 1-2 most informative frames on-device (sharpness, faces and on-screen text, using ML Kit) and sends them, with the TikTok title, uploader and any on-screen text, to NVIDIA's free OpenAI-compatible endpoint. Up to 3 captions run at once, and a backup model takes over if the main one is slow. It applies the same prompt, POV/style rotation, caption cleanup and hashtag recipe as `newsbreak_captions.py`.
 5. The **library screen** shows every video with status and thumbnail. Tap cards to select up to 3, then **Caption** or **Copy**. Failed items can be retried.
 
 ### Memory management
@@ -37,7 +37,8 @@ Scoopz started as a Termux workflow (two Python scripts plus a share-sheet trick
 
 Notes:
 - The free tier is roughly 40 requests/minute per key across all models. The app defaults to 30 (configurable, 1–40).
-- Free vision models take one image per request, hence the stitched frame strip.
+- Free vision models take one image per request, so the picked frames are stitched side by side (kept under ~140 KB).
+- Requests time out after about 45 s and are retried on the **backup model** (Settings). Names in captions come from the TikTok title, hashtags and on-screen text. The app never identifies people from faces.
 - If you get HTTP 403, open the model's page on build.nvidia.com and use *Try API* once to enable it for your key.
 - Audio transcription is not implemented (no free speech-to-text model found); captions use frames only.
 
@@ -87,7 +88,7 @@ android/
     data/                     # Room entities/DAO, encrypted Settings
     net/TikwmClient.kt        # Link -> direct mp4 URL
     work/                     # DownloadWorker, CaptionWorker, Enqueue helpers
-    media/FrameStrip.kt       # 3-frame contact sheet from a video
+    media/FramePicker.kt      # Picks the best 1-2 frames (ML Kit faces + text)
     caption/                  # NVIDIA client, prompt, POV/style rotation, hashtag rules, rate limiter
     ui/                       # Library + Settings screens, ViewModel
     util/LinkParser.kt        # Extract TikTok links from shared text
@@ -101,7 +102,7 @@ Key dependencies: Compose Material 3, Room, WorkManager, OkHttp, Coil (+ video f
 |--------|---------|
 | `collector.py` inbox polling | Share-sheet intent + Room queue (`ShareReceiverActivity`, `Enqueue`) |
 | tikwm download with retries | `TikwmClient` + `DownloadWorker` |
-| ffmpeg frame extraction | `MediaMetadataRetriever` in `FrameStrip` |
+| ffmpeg frame extraction | `MediaMetadataRetriever` in `FramePicker` |
 | `CAPTION_PROMPT`, POV rotation, `normalize_hashtags` | `CaptionPrompt`, `CaptionStyle`, `Hashtags` |
 | OpenAI gpt-4o | NVIDIA endpoint via `NvidiaCaptioner` |
 | Local thumbnail picker page | Compose library screen with selection |

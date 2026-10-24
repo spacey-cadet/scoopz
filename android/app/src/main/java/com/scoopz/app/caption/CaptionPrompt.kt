@@ -1,35 +1,35 @@
 package com.scoopz.app.caption
 
-/** Prompt ported from CAPTION_PROMPT in newsbreak_captions.py, adapted to one stitched image. */
+/** Prompt ported from CAPTION_PROMPT in newsbreak_captions.py, adapted to TikTok info plus 1-2 key frames. */
 object CaptionPrompt {
 
-    fun build(pov: String, styleMode: String, hasSpeech: Boolean, transcript: String): String {
-        // Without usable speech the original script shifts weight to the visuals.
-        val audioW = if (hasSpeech) 0.60 else 0.20
-        val frameW = if (hasSpeech) 0.40 else 0.80
-        val base = TEMPLATE
+    fun build(pov: String, styleMode: String, title: String?, author: String?, onScreenText: String): String {
+        val info = buildString {
+            if (!author.isNullOrBlank()) append("- Uploader: @${author.trim()}\n")
+            if (!title.isNullOrBlank()) append("- Title/hashtags: ${title.trim().take(300)}\n")
+            if (onScreenText.isNotBlank()) append("- Text visible in the video: ${onScreenText.take(300)}\n")
+        }.ifBlank { "- (none available)\n" }
+        return TEMPLATE
             .replace("{pov_mode}", pov)
             .replace("{style_mode}", styleMode)
-            .replace("{audio_weight}", "%.2f".format(audioW))
-            .replace("{frame_weight}", "%.2f".format(frameW))
-        return if (hasSpeech) {
-            "Transcript (prioritize if speech is meaningful): ${transcript.take(1500)}\n\n$base"
-        } else base
+            .replace("{tiktok_info}", info.trimEnd())
     }
 
-    private const val TEMPLATE = """Write a HIGH-CONVERSION caption based on the image: it stitches 3 frames from one video side by side (beginning, middle, end, left to right).
+    private const val TEMPLATE = """Write a HIGH-CONVERSION caption for a short video. The image shows 1-2 key frames from it (side by side, in time order if two).
 
 POV: {pov_mode}
 
-SIGNAL WEIGHTS:
-- Audio/transcript weight: {audio_weight}
-- Visual frames weight: {frame_weight}
-- Default: prioritize spoken words, claims, arguments, admissions, and key quotes from transcript when provided.
-- If there is no transcript, rely on the visuals.
+TIKTOK INFO (the most reliable source for names, topics and facts):
+{tiktok_info}
+
+SIGNAL PRIORITY:
+- Names, topics and claims come from the TikTok info above, including hashtags and visible text.
+- The frames show the action, reaction and mood.
+- NEVER identify a person from their face. Only use a person's name if the text above gives it.
 
 STYLE MODE: {style_mode}
 
-CONTEXT: Use the progression across the frames only to infer tension/reveals; never mention frame order explicitly.
+CONTEXT: Use the frames only to infer tension/reveals; never mention frames or their order.
 
 GOAL:
 - Sound crazy, or out of pocket
@@ -45,7 +45,7 @@ REQUIREMENTS:
 - Include at least one specific anchor detail (exact phrase/object/action) that clearly ties caption to this video
 - Strongly evoke at least one: outrage, suspicion, disbelief, urgency, or moral tension
 - Use pattern interruption — reframe the obvious in an unexpected way (see examples below)
-- Ensure any names mentioned in the transcript or visible in frames are included in the caption for maximum specificity and searchability.
+- Include any names that appear in the TikTok info or visible text (for example "Jay Z talks about fame") for maximum specificity and searchability.
 - Do NOT narrate calmly or describe scenery like a recap
 
 PATTERN INTERRUPTION EXAMPLES:
