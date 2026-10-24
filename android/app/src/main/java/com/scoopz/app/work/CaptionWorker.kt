@@ -6,6 +6,8 @@ import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.scoopz.app.ScoopzApp
 import com.scoopz.app.data.CaptionState
+import com.scoopz.app.error.ErrorExplainer
+import com.scoopz.app.error.Stage
 import com.scoopz.app.media.FramePicker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Semaphore
@@ -33,7 +35,7 @@ class CaptionWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ct
                 dao.setCaptionState(url, CaptionState.NONE)
                 throw e
             } catch (e: Exception) {
-                dao.setCaptionState(url, CaptionState.FAILED, e.message ?: "Caption failed")
+                dao.setCaptionState(url, CaptionState.FAILED, ErrorExplainer.encode(e, Stage.CAPTION))
                 Result.failure()
             }
         }

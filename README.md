@@ -62,6 +62,33 @@ Scoopz started as a Termux workflow (two Python scripts plus a share-sheet trick
 - A second free provider as a further fallback.
 - Audio transcription.
 
+### Error handling
+
+Failures go through a small error layer instead of showing raw messages. Each failed card shows a **title**, **what happened** and **how to fix it**, with a **Settings** shortcut when the fix lives there, plus **Details** (the raw message) and **Ask AI**.
+
+| Code | Shown as | Typical cause | Fix offered |
+|------|----------|---------------|-------------|
+| `E_NO_NETWORK` | No internet connection | Offline, DNS or connection failure | Check connection, Retry |
+| `E_TIMEOUT` | The server took too long | Busy free-tier server | Retry later, faster or backup model |
+| `E_NO_KEY` | No NVIDIA key saved | Key not entered | Open Settings, paste key |
+| `E_BAD_KEY` | NVIDIA rejected your key (401) | Wrong or deleted key | New key in Settings |
+| `E_MODEL_403` | Model not enabled for your key | Model needs *Try API* once | Enable on build.nvidia.com or change model |
+| `E_MODEL_404` | Model not available | Retired or not offered to your account | Pick another model, clear backup |
+| `E_RATE` | Too many requests (429) | Over ~40 requests/minute | Wait, lower the per-minute limit |
+| `E_SERVER` | NVIDIA server problem (5xx) | Their outage | Try again later |
+| `E_REJECTED` | Request rejected (400/413) | Not a vision model, or image refused | Choose a vision model |
+| `E_BAD_REPLY` | Unusable answer | Empty or unreadable model reply | Redo, or another model |
+| `E_NO_FRAMES` | Can't read the video file | Damaged, incomplete or deleted file | Delete the card, share again |
+| `E_TIKWM` | Downloader service is down | tikwm unreachable | Retry later |
+| `E_DL_EXPIRED` | Download link expired or blocked | Direct link stopped working | Retry (fresh link) |
+| `E_STORAGE` | Couldn't save the video | Storage full or refused | Free space, Retry |
+| `E_LINK` | This link couldn't be downloaded | Private, deleted, region locked or not a video | Check it plays in TikTok |
+| `E_UNKNOWN` | Something unexpected went wrong | Anything not matched above | Retry, Ask AI, Details |
+
+How it works: `ErrorExplainer.encode()` runs where a job fails and stores `CODE` plus the raw message on the card (no database change). The UI decodes it back into the matrix row. When several models failed, the main model's error is the headline and all errors stay under Details.
+
+**Ask AI** sends only the error text to your NVIDIA model (main model, then backup) and shows a short plain-language explanation in a dialog. Tokens, API keys and links are redacted first, and no video or caption data is sent. It is hidden for errors where it can't help (no key, no internet, storage). To add a new known error, add a row in `error/ErrorExplainer.kt` and a matching rule in `classify()`.
+
 ### Captioning with NVIDIA free endpoints
 
 1. Create a free key at <https://build.nvidia.com> (Settings → API Keys).
@@ -122,6 +149,7 @@ android/
     net/TikwmClient.kt        # Link -> direct mp4 URL
     work/                     # DownloadWorker, CaptionWorker, Enqueue helpers
     media/FramePicker.kt      # Picks the best 1-2 frames (ML Kit faces + text)
+    error/                    # Error matrix (ErrorExplainer) + optional AI explanations (ErrorAi)
     caption/                  # NVIDIA client, prompt, POV/style rotation, hashtag rules, rate limiter
     ui/                       # Library + Settings screens, ViewModel
     util/LinkParser.kt        # Extract TikTok links from shared text

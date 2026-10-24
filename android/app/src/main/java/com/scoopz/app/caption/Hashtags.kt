@@ -30,6 +30,10 @@ object Hashtags {
         "the", "and", "for", "that", "with", "this", "from", "your", "you", "they",
         "have", "just", "what", "when", "were", "been", "about", "into", "over", "then",
         "them", "their", "there", "would", "could", "should", "video", "caption",
+        "thinks", "think", "says", "said", "watching", "watch", "being", "does", "will", "like",
+        "make", "made", "know", "gets", "getting", "after", "before", "every", "still", "really",
+        "going", "these", "those", "where", "which", "while", "other", "than", "also", "only",
+        "very", "much", "more", "most", "some", "such", "kids", "cringe", "reveals", "talks",
     )
     private val TYPOS = mapOf("localanews" to "localnews")
     private val BREAKING = listOf(

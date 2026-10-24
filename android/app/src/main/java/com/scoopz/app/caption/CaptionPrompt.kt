@@ -47,6 +47,7 @@ REQUIREMENTS:
 - Use pattern interruption — reframe the obvious in an unexpected way (see examples below)
 - Include any names that appear in the TikTok info or visible text (for example "Jay Z talks about fame") for maximum specificity and searchability.
 - Do NOT narrate calmly or describe scenery like a recap
+- Do NOT repeat the TikTok title word for word: rewrite it with a hook
 
 PATTERN INTERRUPTION EXAMPLES:
 - Instead of "This dad is amazing" → "Nobody warned him about the tiny dictator 👑"
@@ -91,7 +92,7 @@ HASHTAGS:
 - Generate 7 relevant hashtags for this video. Avoid platform tags (no #tiktok, #instagram, etc.).
 - Mix reaction tags (emotion/curiosity/energy) with content-specific tags tied to this video's topic.
 
-OUTPUT FORMAT:
+OUTPUT FORMAT (reply with ONLY this: no intro line, no explanation, no markdown, no quotes around the caption, no hashtags inside the caption):
 CAPTION:
 [your caption here]
 

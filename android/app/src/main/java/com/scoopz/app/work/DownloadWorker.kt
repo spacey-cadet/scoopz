@@ -14,6 +14,8 @@ import androidx.work.WorkerParameters
 import com.scoopz.app.R
 import com.scoopz.app.ScoopzApp
 import com.scoopz.app.data.Status
+import com.scoopz.app.error.ErrorExplainer
+import com.scoopz.app.error.Stage
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -69,7 +71,7 @@ class DownloadWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(c
                 if (runAttemptCount < MAX_ATTEMPTS - 1) {
                     Result.retry()
                 } else {
-                    dao.setStatus(url, Status.FAILED, e.message ?: "Download failed")
+                    dao.setStatus(url, Status.FAILED, ErrorExplainer.encode(e, Stage.DOWNLOAD))
                     Result.failure()
                 }
             }

@@ -28,7 +28,11 @@ class Settings(context: Context) {
 
     /** Tried automatically when the main model times out or fails. Leave blank to disable. */
     var backupModel: String
-        get() = prefs.getString("backup_model", DEFAULT_BACKUP_MODEL) ?: DEFAULT_BACKUP_MODEL
+        get() {
+            val v = prefs.getString("backup_model", DEFAULT_BACKUP_MODEL) ?: DEFAULT_BACKUP_MODEL
+            // Earlier builds defaulted to a model many accounts cannot use (HTTP 404): treat it as off.
+            return if (v == RETIRED_BACKUP_MODEL) DEFAULT_BACKUP_MODEL else v
+        }
         set(v) = prefs.edit().putString("backup_model", v.trim()).apply()
 
     var autoCaption: Boolean
@@ -52,6 +56,7 @@ class Settings(context: Context) {
     companion object {
         const val DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
         const val DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
-        const val DEFAULT_BACKUP_MODEL = "microsoft/phi-3-vision-128k-instruct"
+        const val DEFAULT_BACKUP_MODEL = "" // off until you choose a model that works on your key
+        private const val RETIRED_BACKUP_MODEL = "microsoft/phi-3-vision-128k-instruct"
     }
 }
