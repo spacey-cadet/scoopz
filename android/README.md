@@ -34,6 +34,7 @@ Requires Android 10+ (API 29).
 
 ## Not ported yet from the Python scripts
 
-- POV mode rotation and the video-specific hashtag rules in `newsbreak_captions.py`
-- Audio transcription
+- Audio transcription (no free NVIDIA speech-to-text model; captions use frames only, with the script's no-speech weighting)
+
+Ported: the caption prompt, POV rotation, style-mode rotation, caption cleanup, and the hashtag recipe (4 mandatory + up to 3 video-specific tags).
 - Thumbnail pruning settings (replaced by Coil's bounded cache)

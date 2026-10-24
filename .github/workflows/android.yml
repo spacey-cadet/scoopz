@@ -1,8 +1,7 @@
 name: Android debug APK
 
+# Manual only for now (GitHub Actions billing issue). Re-add a `push:` trigger when resolved.
 on:
-  push:
-    paths: ["android/**", ".github/workflows/android.yml"]
   workflow_dispatch:
 
 jobs:

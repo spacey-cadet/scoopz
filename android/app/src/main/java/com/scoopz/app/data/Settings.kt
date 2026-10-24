@@ -35,6 +35,15 @@ class Settings(context: Context) {
         get() = prefs.getInt("rpm", 30)
         set(v) = prefs.edit().putInt("rpm", v.coerceIn(1, 40)).apply()
 
+    /** Rotation state for caption POV / style (persisted like ~/.cache/scoopz_pov.json). */
+    var povLast: String
+        get() = prefs.getString("pov_last", "third") ?: "third"
+        set(v) = prefs.edit().putString("pov_last", v).apply()
+
+    var styleIndex: Int
+        get() = prefs.getInt("style_idx", 0)
+        set(v) = prefs.edit().putInt("style_idx", v).apply()
+
     companion object {
         const val DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
         const val DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"

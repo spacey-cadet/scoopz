@@ -28,7 +28,7 @@ class CaptionWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ct
                 dao.setCaptionState(url, CaptionState.RUNNING)
                 val jpeg = withContext(Dispatchers.IO) { FrameStrip.build(applicationContext, uri) }
                     ?: throw IllegalStateException("Could not read frames from video")
-                val result = g.captioner.caption(jpeg, video.title)
+                val result = g.captioner.caption(jpeg)
                 dao.setCaption(url, result.caption, result.hashtags)
                 Result.success()
             } catch (e: CancellationException) {
