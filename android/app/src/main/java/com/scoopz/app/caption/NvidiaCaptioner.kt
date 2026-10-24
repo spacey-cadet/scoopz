@@ -57,15 +57,16 @@ class NvidiaCaptioner(
         val models = listOf(settings.model, settings.backupModel)
             .map { it.trim() }.filter { it.isNotEmpty() }.distinct()
 
-        var last: ModelFailed? = null
+        // Keep every model's error so the card shows why the main model failed, not just the backup.
+        val failures = mutableListOf<String>()
         for (model in models) {
             try {
                 return@withContext callModel(model, key, prompt, b64, contextText)
             } catch (e: ModelFailed) {
-                last = e
+                failures += e.message.orEmpty().take(140)
             }
         }
-        throw IOException(last?.message ?: "No model configured")
+        throw IOException(failures.joinToString("\n").ifBlank { "No model configured" })
     }
 
     private suspend fun callModel(model: String, key: String, prompt: String, b64: String, contextText: String): Result {
@@ -106,6 +107,7 @@ class NvidiaCaptioner(
                 code == 400 && !inlineImg -> inlineImg = true // some models want the <img src="data:..."> form
                 code == 401 -> throw IOException("NVIDIA rejected your API key (HTTP 401). Check it in Settings.")
                 code == 403 -> throw ModelFailed("$model is not enabled for your key (HTTP 403). Open it on build.nvidia.com and use Try API once.")
+                code == 404 -> throw ModelFailed("$model is not available to your account (HTTP 404). Choose another model in Settings.")
                 else -> throw ModelFailed("$model returned HTTP $code: ${text.take(120)}")
             }
         }
@@ -144,8 +146,13 @@ class NvidiaCaptioner(
             ?: text.substringBefore("HASHTAG", text).trim()
         val hashtagsRaw = Regex("""HASHTAGS?:\s*(.+?)$""", opts).find(text)?.groupValues?.get(1)?.trim().orEmpty()
 
+        // Tags the model put inside the caption, and tags from the TikTok title, are good candidates too.
+        val tagRe = Regex("""#\w{2,30}""")
+        val inlineTags = tagRe.findAll(captionRaw).joinToString(" ") { it.value }
+        val titleTags = tagRe.findAll(contextText).take(4).joinToString(" ") { it.value }
+
         val caption = CaptionStyle.cleanCaption(captionRaw)
         if (caption.isEmpty()) throw ModelFailed("Empty caption from model")
-        return Result(caption, Hashtags.normalize(hashtagsRaw, caption, contextText))
+        return Result(caption, Hashtags.normalize("$hashtagsRaw $inlineTags $titleTags", caption, contextText))
     }
 }
