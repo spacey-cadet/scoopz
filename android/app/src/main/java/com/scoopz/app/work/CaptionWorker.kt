@@ -26,7 +26,7 @@ class CaptionWorker(ctx: Context, params: WorkerParameters) : CoroutineWorker(ct
         return gate.withPermit {
             try {
                 dao.setCaptionState(url, CaptionState.RUNNING)
-                val picked = FramePicker.pick(applicationContext, uri)
+                val picked = FramePicker.pick(applicationContext, uri, if (g.settings.twoFrames) 2 else 1)
                     ?: throw IllegalStateException("Could not read frames from video")
                 val result = g.captioner.caption(picked.jpeg, video.title, video.author, picked.onScreenText)
                 dao.setCaption(url, result.caption, result.hashtags)

@@ -41,6 +41,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     var model by remember { mutableStateOf(s.model) }
     var rpm by remember { mutableStateOf(s.requestsPerMinute.toString()) }
     var auto by remember { mutableStateOf(s.autoCaption) }
+    var twoFrames by remember { mutableStateOf(s.twoFrames) }
 
     fun save() {
         s.apiKey = key
@@ -49,6 +50,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         s.backupModel = backup
         s.requestsPerMinute = rpm.toIntOrNull() ?: 30
         s.autoCaption = auto
+        s.twoFrames = twoFrames
     }
 
     BackHandler { save(); onBack() }
@@ -95,6 +97,10 @@ fun SettingsScreen(onBack: () -> Unit) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text("Caption automatically after download", Modifier.weight(1f))
                 Switch(auto, { auto = it })
+            }
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Send 2 frames per caption (slower, more context)", Modifier.weight(1f))
+                Switch(twoFrames, { twoFrames = it })
             }
             Button(onClick = { save(); onBack() }, Modifier.fillMaxWidth()) { Text("Save") }
             TextButton(onClick = {

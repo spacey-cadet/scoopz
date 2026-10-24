@@ -19,7 +19,7 @@ Scoopz started as a Termux workflow (two Python scripts plus a share-sheet trick
 1. **Share** a TikTok link to *Scoopz* from any app's share sheet (or tap **+** to paste from the clipboard).
 2. The link is stored in a local Room database queue — no inbox file, no polling.
 3. A background **download worker** (WorkManager + foreground notification) resolves the link via tikwm and streams the mp4 into `Movies/Scoopz` through MediaStore. Up to 3 downloads run in parallel; duplicates are skipped by video id.
-4. A **caption worker** picks the 1-2 most informative frames on-device (sharpness, faces and on-screen text, using ML Kit) and sends them, with the TikTok title, uploader and any on-screen text, to NVIDIA's free OpenAI-compatible endpoint. Up to 3 captions run at once, and a backup model takes over if the main one is slow. It applies the same prompt, POV/style rotation, caption cleanup and hashtag recipe as `newsbreak_captions.py`.
+4. A **caption worker** picks the most informative frame on-device (best two if you enable it in Settings) (sharpness, faces and on-screen text, using ML Kit) and sends them, with the TikTok title, uploader and any on-screen text, to NVIDIA's free OpenAI-compatible endpoint. Up to 3 captions run at once, and a backup model takes over if the main one is slow. It applies the same prompt, POV/style rotation, caption cleanup and hashtag recipe as `newsbreak_captions.py`.
 5. The **library screen** shows every video with status and thumbnail. Tap cards to select up to 3, then **Caption** or **Copy**. Failed items can be retried.
 
 ### Memory management
@@ -41,7 +41,7 @@ Scoopz started as a Termux workflow (two Python scripts plus a share-sheet trick
 - Unique work names per link, so double-sharing never queues the same download twice.
 
 **Captioning**
-- Frames are picked on the phone: 8 sampled, scored for sharpness, faces and on-screen text, and only the best 1-2 are sent, instead of sending every frame.
+- Frames are picked on the phone: 8 sampled, scored for sharpness, faces and on-screen text, and only the best one is sent by default (two if enabled in Settings), instead of sending every frame. Wide images are capped at 720 px because very wide pictures make vision models slow.
 - One full frame is decoded at a time, and at most 3 small bitmaps are held. Every bitmap is recycled as soon as it is used.
 - The stitched image is a 384 px-high JPEG in 16-bit colour whose quality is lowered until it is under ~140 KB, which keeps requests small and fast.
 - Short responses (`max_tokens` 300) and a request timeout of about 45 s.

@@ -35,6 +35,11 @@ class Settings(context: Context) {
         }
         set(v) = prefs.edit().putString("backup_model", v.trim()).apply()
 
+    /** Off = send only the single best frame (fastest). On = best two frames, slower. */
+    var twoFrames: Boolean
+        get() = prefs.getBoolean("two_frames", false)
+        set(v) = prefs.edit().putBoolean("two_frames", v).apply()
+
     var autoCaption: Boolean
         get() = prefs.getBoolean("auto_caption", true)
         set(v) = prefs.edit().putBoolean("auto_caption", v).apply()
