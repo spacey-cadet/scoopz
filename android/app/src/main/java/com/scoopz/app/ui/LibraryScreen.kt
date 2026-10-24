@@ -47,6 +47,7 @@ import coil.size.Size
 import com.scoopz.app.data.CaptionState
 import com.scoopz.app.data.Status
 import com.scoopz.app.data.VideoEntity
+import com.scoopz.app.error.Stage
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -54,6 +55,8 @@ fun LibraryScreen(vm: LibraryViewModel, onOpenSettings: () -> Unit) {
     val ctx = LocalContext.current
     val videos by vm.videos.collectAsState()
     val selected by vm.selected.collectAsState()
+    val ai by vm.aiState.collectAsState()
+    AiDialog(ai, onDismiss = vm::dismissAi)
 
     Scaffold(
         topBar = {
@@ -103,6 +106,8 @@ fun LibraryScreen(vm: LibraryViewModel, onOpenSettings: () -> Unit) {
                         onRetry = { vm.retry(v.sourceUrl) },
                         onDelete = { vm.delete(v) },
                         onCopy = { copy(ctx, captionText(v).orEmpty()) },
+                        onOpenSettings = onOpenSettings,
+                        onExplain = vm::explainWithAi,
                     )
                 }
             }
@@ -120,6 +125,8 @@ private fun VideoCard(
     onRetry: () -> Unit,
     onDelete: () -> Unit,
     onCopy: () -> Unit,
+    onOpenSettings: () -> Unit,
+    onExplain: (Stage, String) -> Unit,
 ) {
     val ctx = LocalContext.current
     Card(
@@ -154,7 +161,7 @@ private fun VideoCard(
                         LinearProgressIndicator(Modifier.fillMaxWidth())
                     }
                     Status.FAILED -> {
-                        Text(v.error ?: "Failed", color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+                        ErrorPanel(v.error, Stage.DOWNLOAD, onOpenSettings, onExplain)
                         Row {
                             TextButton(onClick = onRetry) { Text("Retry") }
                             TextButton(onClick = onDelete) { Text("Remove") }
@@ -172,11 +179,7 @@ private fun VideoCard(
                                 maxLines = 6,
                                 overflow = TextOverflow.Ellipsis,
                             )
-                            CaptionState.FAILED -> Text(
-                                v.error ?: "Caption failed",
-                                color = MaterialTheme.colorScheme.error,
-                                style = MaterialTheme.typography.bodySmall,
-                            )
+                            CaptionState.FAILED -> ErrorPanel(v.error, Stage.CAPTION, onOpenSettings, onExplain)
                             CaptionState.NONE -> Text("No caption yet", style = MaterialTheme.typography.bodySmall)
                         }
                         Row {

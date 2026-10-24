@@ -6,6 +6,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.scoopz.app.ScoopzApp
 import com.scoopz.app.data.VideoEntity
+import com.scoopz.app.error.AiState
+import com.scoopz.app.error.Stage
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import com.scoopz.app.util.LinkParser
 import com.scoopz.app.work.Enqueue
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -21,6 +25,30 @@ class LibraryViewModel(private val app: Application) : AndroidViewModel(app) {
 
     val videos: StateFlow<List<VideoEntity>> = dao.observeAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** State of the "Ask AI" error explanation dialog (null = closed). */
+    private val _ai = MutableStateFlow<AiState?>(null)
+    val aiState: StateFlow<AiState?> = _ai
+    private var aiJob: Job? = null
+
+    fun explainWithAi(stage: Stage, raw: String) {
+        aiJob?.cancel()
+        _ai.value = AiState.Loading
+        aiJob = viewModelScope.launch {
+            _ai.value = try {
+                AiState.Done(g.errorAi.explain(stage, raw))
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                AiState.Failed(e.message ?: "AI explanation isn't available right now.")
+            }
+        }
+    }
+
+    fun dismissAi() {
+        aiJob?.cancel()
+        _ai.value = null
+    }
 
     /** Picker selection, capped at 3 like the original script. */
     private val _selected = MutableStateFlow<Set<String>>(emptySet())

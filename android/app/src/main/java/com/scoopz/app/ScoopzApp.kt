@@ -11,6 +11,7 @@ import coil.memory.MemoryCache
 import com.scoopz.app.caption.NvidiaCaptioner
 import com.scoopz.app.caption.RateLimiter
 import com.scoopz.app.data.ScoopzDb
+import com.scoopz.app.error.ErrorAi
 import com.scoopz.app.data.Settings
 import com.scoopz.app.net.TikwmClient
 import kotlinx.coroutines.CoroutineScope
@@ -32,6 +33,7 @@ class Graph(app: Application) {
     val tikwm = TikwmClient(http)
     val limiter = RateLimiter { settings.requestsPerMinute }
     val captioner = NvidiaCaptioner(http, settings, limiter)
+    val errorAi = ErrorAi(http, settings, limiter)
 }
 
 class ScoopzApp : Application(), ImageLoaderFactory {
