@@ -1,6 +1,127 @@
 # Scoopz
 
-> TikTok collector + AI caption generator for Termux
+> Share a TikTok link → download → AI caption, all in one Android app.
+
+Scoopz started as a Termux workflow (two Python scripts plus a share-sheet trick). It is moving to a native Android app so the whole pipeline — link sharing, downloading, captioning — happens in one place with proper memory management and no terminal. The original Termux workflow is kept below and still works.
+
+| Track | Status | Where |
+|-------|--------|-------|
+| **Android app (Kotlin, Jetpack Compose)** | Scaffolded, builds not yet verified | [`android/`](android/) |
+| **Flutter app** | Planned, not started | — |
+| Termux scripts + FastAPI scaffold | Working (legacy) | repo root, `app/` |
+
+---
+
+## Android app
+
+### What it does
+
+1. **Share** a TikTok link to *Scoopz* from any app's share sheet (or tap **+** to paste from the clipboard).
+2. The link is stored in a local Room database queue — no inbox file, no polling.
+3. A background **download worker** (WorkManager + foreground notification) resolves the link via tikwm and streams the mp4 into `Movies/Scoopz` through MediaStore. Up to 3 downloads run in parallel; duplicates are skipped by video id.
+4. A **caption worker** stitches 3 frames into one image and sends it to NVIDIA's free OpenAI-compatible endpoint. It applies the same prompt, POV/style rotation, caption cleanup and hashtag recipe as `newsbreak_captions.py`.
+5. The **library screen** shows every video with status and thumbnail. Tap cards to select up to 3, then **Caption** or **Copy**. Failed items can be retried.
+
+### Memory management
+
+- Videos stream to disk in 64 KB chunks and are never held in RAM.
+- Frame extraction decodes one frame at a time and recycles every bitmap immediately.
+- Thumbnail memory cache is capped at 12% of app memory; the disk cache at 64 MB.
+- Download and caption concurrency are bounded by semaphores, and API calls are spaced by a rate limiter.
+
+### Captioning with NVIDIA free endpoints
+
+1. Create a free key at <https://build.nvidia.com> (Settings → API Keys).
+2. In the app: **Settings → NVIDIA API key**.
+3. Default model: `meta/llama-3.2-11b-vision-instruct`, base URL `https://integrate.api.nvidia.com/v1`.
+
+Notes:
+- The free tier is roughly 40 requests/minute per key across all models. The app defaults to 30 (configurable, 1–40).
+- Free vision models take one image per request, hence the stitched frame strip.
+- If you get HTTP 403, open the model's page on build.nvidia.com and use *Try API* once to enable it for your key.
+- Audio transcription is not implemented (no free speech-to-text model found); captions use frames only.
+
+### Developer setup
+
+**Requirements**
+
+- Android Studio (current stable) with JDK 17
+- Android SDK Platform 35 (compile/target); device or emulator with Android 10+ (API 29+)
+- Internet access for the first Gradle sync
+
+**Run it**
+
+```bash
+git clone https://github.com/spacey-cadet/scoopz
+cd scoopz
+git checkout android-app        # until merged into main
+```
+
+1. Open the `android/` folder in Android Studio and let Gradle sync. If prompted for a Gradle wrapper, accept it (or run `gradle wrapper --gradle-version 8.9` inside `android/`).
+2. Select a device and press **Run**.
+
+**Command line**
+
+```bash
+cd android
+gradle :app:assembleDebug        # APK: app/build/outputs/apk/debug/app-debug.apk
+adb install -r app/build/outputs/apk/debug/app-debug.apk
+```
+
+**CI:** `.github/workflows/android.yml` builds a debug APK, but it is currently manual-only (`workflow_dispatch`) while GitHub Actions billing is sorted out. Re-add a `push:` trigger once it is.
+
+**First run checklist**
+
+1. Open the app, allow notifications, go to **Settings** and paste your NVIDIA key.
+2. In TikTok: **Share → Scoopz**. The video appears in the library, downloads, then gets a caption.
+3. Tap **Copy** on a captioned card and paste it where you post.
+
+### Project layout
+
+```text
+android/
+  app/src/main/java/com/scoopz/app/
+    ScoopzApp.kt              # Application + service locator (DB, HTTP, settings, captioner)
+    MainActivity.kt           # Compose host: library <-> settings
+    ShareReceiverActivity.kt  # Invisible share-sheet target: parse, queue, close
+    data/                     # Room entities/DAO, encrypted Settings
+    net/TikwmClient.kt        # Link -> direct mp4 URL
+    work/                     # DownloadWorker, CaptionWorker, Enqueue helpers
+    media/FrameStrip.kt       # 3-frame contact sheet from a video
+    caption/                  # NVIDIA client, prompt, POV/style rotation, hashtag rules, rate limiter
+    ui/                       # Library + Settings screens, ViewModel
+    util/LinkParser.kt        # Extract TikTok links from shared text
+```
+
+Key dependencies: Compose Material 3, Room, WorkManager, OkHttp, Coil (+ video frame decoder), AndroidX Security Crypto (encrypted API key storage).
+
+### Mapping from the Python scripts
+
+| Python | Android |
+|--------|---------|
+| `collector.py` inbox polling | Share-sheet intent + Room queue (`ShareReceiverActivity`, `Enqueue`) |
+| tikwm download with retries | `TikwmClient` + `DownloadWorker` |
+| ffmpeg frame extraction | `MediaMetadataRetriever` in `FrameStrip` |
+| `CAPTION_PROMPT`, POV rotation, `normalize_hashtags` | `CaptionPrompt`, `CaptionStyle`, `Hashtags` |
+| OpenAI gpt-4o | NVIDIA endpoint via `NvidiaCaptioner` |
+| Local thumbnail picker page | Compose library screen with selection |
+| `termux-notification` | Android notifications (WorkManager foreground service) |
+
+### Known gaps
+
+- The Android project has not been compiled yet; expect a few first-build fixes.
+- No audio transcription.
+- No unit tests yet (good first targets: `LinkParser`, `Hashtags`, `CaptionStyle`).
+
+---
+
+## Flutter (planned)
+
+A Flutter version is wanted for cross-platform reach. The Kotlin app is the reference implementation. A Flutter port would reuse the same architecture, with platform channels (or plugins) for the Android-specific parts: share-sheet receiving, MediaStore saving, frame extraction and background downloads. Nothing has been started; track it in the repo issues.
+
+---
+
+## Termux workflow (original)
 
 Scoopz is a two-script Termux workflow for Android that watches a link inbox, downloads TikTok videos, and generates ready-to-post captions using OpenAI's vision API.
 
@@ -11,7 +132,7 @@ Scoopz is a two-script Termux workflow for Android that watches a link inbox, do
 
 ---
 
-## FastAPI Scaffold
+### FastAPI Scaffold
 
 The API scaffold is intentionally thin: it defines the router layout, dependency injection points, Pydantic models, and lightweight services that can be wired into the existing scripts as the backend matures.
 
@@ -80,9 +201,9 @@ Initial endpoints:
 
 ---
 
-## Prerequisites
+### Prerequisites
 
-### Termux Packages
+#### Termux Packages
 
 ```bash
 pkg update && pkg upgrade -y
@@ -91,7 +212,7 @@ pip install --upgrade pip
 pip install requests
 ```
 
-### Storage Permission
+#### Storage Permission
 
 ```bash
 termux-setup-storage
@@ -99,16 +220,16 @@ termux-setup-storage
 
 ---
 
-## Installation
+### Installation
 
-### 1. Clone the repo
+#### 1. Clone the repo
 
 ```bash
 git clone https://github.com/spacey-cadet/scoopz ~/scoopz
 cd ~/scoopz
 ```
 
-### 2. Install shell commands
+#### 2. Install shell commands
 
 ```bash
 chmod +x scoopz_env.sh
@@ -116,7 +237,7 @@ echo 'source ~/scoopz/scoopz_env.sh' >> ~/.bashrc
 source ~/.bashrc
 ```
 
-### 3. Verify
+#### 3. Verify
 
 ```bash
 scoopz-help
@@ -126,7 +247,7 @@ You should see: `Scoopz ready` and the list of workflow commands.
 
 ---
 
-## Required Folders & Files
+### Required Folders & Files
 
 ```bash
 mkdir -p /sdcard/Pictures/scoopz
@@ -154,9 +275,9 @@ chmod 600 ~/.config/openai_key.txt
 
 ---
 
-## Daily Workflow
+### Daily Workflow
 
-### Terminal 1 — Collector
+#### Terminal 1 — Collector
 
 ```bash
 python collector.py
@@ -166,7 +287,7 @@ python collector.py
 - Downloads valid TikTok URLs to `/sdcard/Pictures/scoopz`
 - Skips duplicates using `scoopz_history.log`
 
-### Terminal 2 — Captions
+#### Terminal 2 — Captions
 
 ```bash
 python newsbreak_captions.py
@@ -180,7 +301,7 @@ python newsbreak_captions.py
 
 ---
 
-## Configuration
+### Configuration
 
 Defaults in `newsbreak_captions.py`:
 
@@ -194,13 +315,13 @@ Defaults in `newsbreak_captions.py`:
 | `CLIPBOARD_AUTO_CYCLE` | `False` |
 | `CLIPBOARD_CYCLE_DELAY_SEC` | `3.0` |
 
-### Port Handling
+#### Port Handling
 
 The server tries to bind on port `8765` normally. If the port is in use, it attempts to free the listener process (`lsof`/`ss`/`netstat`/`fuser`), then retries automatically.
 
 ---
 
-## Troubleshooting
+### Troubleshooting
 
 **No videos appear in picker**
 - Verify `.mp4` files exist in `/sdcard/Pictures/scoopz`
@@ -215,7 +336,7 @@ The server tries to bind on port `8765` normally. If the port is in use, it atte
 
 ---
 
-## Minimal End-to-End Test
+### Minimal End-to-End Test
 
 1. Start `collector.py`
 2. Add one TikTok URL to `/sdcard/Download/links_inbox.txt`
