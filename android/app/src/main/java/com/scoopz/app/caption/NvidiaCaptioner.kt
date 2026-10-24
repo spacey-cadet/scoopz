@@ -34,7 +34,8 @@ class NvidiaCaptioner(
 
         var useInlineImg = false
         var attempt = 0
-        while (true) {
+        var result: Result? = null
+        while (result == null) {
             limiter.acquire()
             val body = buildBody(prompt, b64, useInlineImg)
             val req = Request.Builder()
@@ -47,7 +48,9 @@ class NvidiaCaptioner(
             http.newCall(req).execute().use { resp ->
                 val text = resp.body?.string().orEmpty()
                 when {
-                    resp.isSuccessful -> return@withContext parse(text, transcript)
+                    resp.isSuccessful -> {
+                        result = parse(text, transcript)
+                    }
                     resp.code == 429 && attempt < MAX_RETRIES -> {
                         val wait = (resp.header("Retry-After")?.toLongOrNull() ?: 5L) * 1000
                         limiter.penalize(wait)
@@ -64,6 +67,7 @@ class NvidiaCaptioner(
                 }
             }
         }
+        checkNotNull(result)
     }
 
     private fun buildBody(prompt: String, b64: String, inlineImg: Boolean): JSONObject {
