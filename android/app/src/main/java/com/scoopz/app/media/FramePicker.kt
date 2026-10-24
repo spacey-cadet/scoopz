@@ -3,6 +3,7 @@ package com.scoopz.app.media
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
+import android.graphics.RectF
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import com.google.mlkit.vision.common.InputImage
@@ -36,10 +37,12 @@ object FramePicker {
     private const val KEEP = 3
     private const val FRAME_HEIGHT = 384
     private const val MAX_BYTES = 140_000 // NVIDIA's free endpoints stall on large inline images
+    private const val MAX_WIDTH = 720f
 
     private class Candidate(val index: Int, val bitmap: Bitmap, val score: Float, val text: String)
 
-    suspend fun pick(context: Context, uri: Uri): Picked? = withContext(Dispatchers.IO) {
+    /** [maxFrames] 1 = fastest (best frame only), 2 = best two frames side by side. */
+    suspend fun pick(context: Context, uri: Uri, maxFrames: Int = 1): Picked? = withContext(Dispatchers.IO) {
         val retriever = MediaMetadataRetriever()
         val kept = ArrayList<Candidate>(KEEP + 1)
         val faceDetector = FaceDetection.getClient(
@@ -74,7 +77,7 @@ object FramePicker {
             val ranked = kept.sortedByDescending { it.score }
             val best = ranked.first()
             val second = ranked.drop(1).firstOrNull { kotlin.math.abs(it.index - best.index) >= 2 }
-            val chosen = listOfNotNull(best, second).sortedBy { it.index }
+            val chosen = (if (maxFrames >= 2) listOfNotNull(best, second) else listOf(best)).sortedBy { it.index }
 
             val onScreen = chosen
                 .flatMap { it.text.lines() }
@@ -94,13 +97,18 @@ object FramePicker {
     }
 
     private fun stitch(frames: List<Candidate>): ByteArray {
-        val width = frames.sumOf { it.bitmap.width }
-        val sheet = Bitmap.createBitmap(width, FRAME_HEIGHT, Bitmap.Config.RGB_565)
+        val rawWidth = frames.sumOf { it.bitmap.width }
+        // Very wide images (two landscape frames side by side) make vision models slow: cap the width.
+        val scale = (MAX_WIDTH / rawWidth.toFloat()).coerceAtMost(1f)
+        val sheetW = (rawWidth * scale).toInt().coerceAtLeast(1)
+        val sheetH = (FRAME_HEIGHT * scale).toInt().coerceAtLeast(1)
+        val sheet = Bitmap.createBitmap(sheetW, sheetH, Bitmap.Config.RGB_565)
         val canvas = Canvas(sheet)
         var x = 0f
         for (f in frames) {
-            canvas.drawBitmap(f.bitmap, x, 0f, null)
-            x += f.bitmap.width
+            val w = f.bitmap.width * scale
+            canvas.drawBitmap(f.bitmap, null, RectF(x, 0f, x + w, sheetH.toFloat()), null)
+            x += w
         }
         var quality = 75
         var bytes: ByteArray

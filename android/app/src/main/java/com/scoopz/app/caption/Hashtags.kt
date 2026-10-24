@@ -6,7 +6,10 @@ package com.scoopz.app.caption
  * 4 mandatory general tags + up to 3 video-specific tags (max 7).
  */
 object Hashtags {
-    private val PLATFORM = setOf("tiktok", "instagram", "reels", "youtube", "shorts", "facebook", "snapchat")
+    private val PLATFORM = setOf(
+        "tiktok", "instagram", "reels", "youtube", "shorts", "facebook", "snapchat",
+        "fyp", "foryou", "foryoupage", "viral", // generic reach tags: not about this video
+    )
 
     private val GENERAL_VIRAL_POOL = listOf(
         "wtfmoment", "awkward", "watch", "reaction", "relatable", "breakingnews", "local",
