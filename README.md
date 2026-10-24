@@ -29,6 +29,39 @@ Scoopz started as a Termux workflow (two Python scripts plus a share-sheet trick
 - Thumbnail memory cache is capped at 12% of app memory; the disk cache at 64 MB.
 - Download and caption concurrency are bounded by semaphores, and API calls are spaced by a rate limiter.
 
+### Optimization techniques
+
+**Downloads**
+- Streamed to disk in 64 KB chunks and written straight into MediaStore (marked pending until complete), so a video is never held in RAM.
+- At most 3 downloads at once, behind a semaphore.
+- The same video shared under different links is detected by video id and reused instead of downloaded again.
+- Automatic retries with exponential backoff (up to 3 attempts), and a half-written file is deleted on failure or cancel.
+- Runs only when the network is connected, as expedited background work with a foreground notification, so Android doesn't kill it.
+- Progress notifications update every 10%, not on every chunk.
+- Unique work names per link, so double-sharing never queues the same download twice.
+
+**Captioning**
+- Frames are picked on the phone: 8 sampled, scored for sharpness, faces and on-screen text, and only the best 1-2 are sent, instead of sending every frame.
+- One full frame is decoded at a time, and at most 3 small bitmaps are held. Every bitmap is recycled as soon as it is used.
+- The stitched image is a 384 px-high JPEG in 16-bit colour whose quality is lowered until it is under ~140 KB, which keeps requests small and fast.
+- Short responses (`max_tokens` 300) and a request timeout of about 45 s.
+- A slow or failing model automatically falls back to the backup model instead of making you wait.
+- Up to 3 captions run in parallel. Each card updates on its own as soon as its caption is ready.
+- A rate limiter spaces requests to stay under the free tier's requests-per-minute cap, and a `429` response pauses all queued requests for the server's `Retry-After` time.
+- An alternative image format is tried automatically if a model rejects the first one.
+
+**Interface and storage**
+- The library list is lazy, keyed by video, and fed by a Room `Flow` that only runs while the screen is visible.
+- Thumbnails are decoded at 256 px, with the memory cache capped at 12% of app memory and the disk cache at 64 MB.
+- The API key lives in encrypted preferences (Android Keystore), and app backup is turned off so it never leaves the phone.
+- Release builds use R8 shrinking and resource shrinking to keep the APK small.
+- The share target is a transparent activity that queues the link and closes instantly, so sharing never interrupts what you are doing.
+
+**Planned**
+- Instant text-only draft captions from the TikTok title, with an optional vision upgrade.
+- A second free provider as a further fallback.
+- Audio transcription.
+
 ### Captioning with NVIDIA free endpoints
 
 1. Create a free key at <https://build.nvidia.com> (Settings → API Keys).
