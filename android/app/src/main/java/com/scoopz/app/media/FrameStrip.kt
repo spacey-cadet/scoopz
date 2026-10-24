@@ -15,7 +15,10 @@ import java.io.ByteArrayOutputStream
  * a time and every bitmap is recycled as soon as it is drawn.
  */
 object FrameStrip {
-    private const val FRAME_HEIGHT = 512
+    private const val FRAME_HEIGHT = 320
+
+    /** NVIDIA's free endpoints reject or stall on large inline images (~180 KB limit). */
+    private const val MAX_BYTES = 140_000
     private val POSITIONS = doubleArrayOf(0.15, 0.50, 0.85)
 
     fun build(context: Context, uri: Uri): ByteArray? {
@@ -49,10 +52,17 @@ object FrameStrip {
             }
             frames.clear()
 
-            val out = ByteArrayOutputStream()
-            sheet.compress(Bitmap.CompressFormat.JPEG, 80, out)
+            // Lower the quality until the image fits the size budget.
+            var quality = 75
+            var bytes: ByteArray
+            do {
+                val out = ByteArrayOutputStream()
+                sheet.compress(Bitmap.CompressFormat.JPEG, quality, out)
+                bytes = out.toByteArray()
+                quality -= 10
+            } while (bytes.size > MAX_BYTES && quality >= 25)
             sheet.recycle()
-            return out.toByteArray()
+            return bytes
         } finally {
             frames.forEach { if (!it.isRecycled) it.recycle() }
             runCatching { retriever.release() }

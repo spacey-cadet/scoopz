@@ -24,6 +24,13 @@ class NvidiaCaptioner(
 ) {
     data class Result(val caption: String, val hashtags: String)
 
+    /** Vision calls on the free tier can take over a minute, so allow far longer than normal calls. */
+    private val slowHttp: OkHttpClient = http.newBuilder()
+        .readTimeout(150, java.util.concurrent.TimeUnit.SECONDS)
+        .writeTimeout(60, java.util.concurrent.TimeUnit.SECONDS)
+        .callTimeout(180, java.util.concurrent.TimeUnit.SECONDS)
+        .build()
+
     suspend fun caption(jpeg: ByteArray, transcript: String = ""): Result = withContext(Dispatchers.IO) {
         val key = settings.apiKey
         if (key.isBlank()) throw IOException("Add your NVIDIA API key in Settings")
@@ -45,7 +52,18 @@ class NvidiaCaptioner(
                 .post(body.toString().toRequestBody("application/json".toMediaType()))
                 .build()
 
-            http.newCall(req).execute().use { resp ->
+            val response = try {
+                slowHttp.newCall(req).execute()
+            } catch (e: java.io.InterruptedIOException) {
+                // Free-tier queues can stall; retry before giving up.
+                if (attempt < MAX_RETRIES) {
+                    attempt++
+                    delay(2_000)
+                    continue
+                }
+                throw IOException("NVIDIA took too long to answer. Try again, or pick a smaller/faster model in Settings.")
+            }
+            response.use { resp ->
                 val text = resp.body?.string().orEmpty()
                 when {
                     resp.isSuccessful -> {
