@@ -4,8 +4,14 @@ package com.scoopz.app.caption
 object CaptionPrompt {
 
     /** Vision prompt: the model also receives the picked frame(s). */
-    fun build(pov: String, styleMode: String, title: String?, author: String?, onScreenText: String): String =
-        fill(TEMPLATE, pov, styleMode, title, author, onScreenText, emptyList(), "")
+    fun build(
+        pov: String,
+        styleMode: String,
+        title: String?,
+        author: String?,
+        onScreenText: String,
+        transcript: String = "",
+    ): String = fill(TEMPLATE, pov, styleMode, title, author, onScreenText, emptyList(), transcript)
 
     /** Text prompt: no image is sent, so the model works only from the info and on-device labels. */
     fun buildText(

@@ -44,6 +44,9 @@ fun SettingsScreen(onBack: () -> Unit, onFindModels: () -> Unit) {
     var rpm by remember { mutableStateOf(s.requestsPerMinute.toString()) }
     var auto by remember { mutableStateOf(s.autoCaption) }
     var twoFrames by remember { mutableStateOf(s.twoFrames) }
+    var sttKey by remember { mutableStateOf(s.sttKey) }
+    var sttModel by remember { mutableStateOf(s.sttModel) }
+    var sttUrl by remember { mutableStateOf(s.sttBaseUrl) }
 
     fun save() {
         s.apiKey = key
@@ -55,6 +58,9 @@ fun SettingsScreen(onBack: () -> Unit, onFindModels: () -> Unit) {
         s.requestsPerMinute = rpm.toIntOrNull() ?: 30
         s.autoCaption = auto
         s.twoFrames = twoFrames
+        s.sttKey = sttKey
+        s.sttModel = sttModel.ifBlank { Settings.DEFAULT_STT_MODEL }
+        s.sttBaseUrl = sttUrl.ifBlank { Settings.DEFAULT_STT_BASE_URL }
     }
 
     BackHandler { save(); onBack() }
@@ -117,12 +123,37 @@ fun SettingsScreen(onBack: () -> Unit, onFindModels: () -> Unit) {
                 Text("Send 2 frames per caption (slower, more context)", Modifier.weight(1f))
                 Switch(twoFrames, { twoFrames = it })
             }
+            Text("Transcription (optional, biggest caption boost)")
+            Text(
+                "Reads what is said in the video so captions match the content. Free key at console.groq.com. " +
+                    "Leave blank to skip it.",
+            )
+            OutlinedTextField(
+                sttKey, { sttKey = it }, Modifier.fillMaxWidth(),
+                label = { Text("Transcription API key (Groq)") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                supportingText = {
+                    val err = s.sttLastError
+                    Text(if (err.isBlank()) "Only the audio track is uploaded, never the video." else "Last problem: $err")
+                },
+            )
+            OutlinedTextField(
+                sttModel, { sttModel = it }, Modifier.fillMaxWidth(),
+                label = { Text("Transcription model") }, singleLine = true,
+            )
+            OutlinedTextField(
+                sttUrl, { sttUrl = it }, Modifier.fillMaxWidth(),
+                label = { Text("Transcription base URL") }, singleLine = true,
+            )
             Button(onClick = { save(); onBack() }, Modifier.fillMaxWidth()) { Text("Save") }
             TextButton(onClick = {
                 baseUrl = Settings.DEFAULT_BASE_URL
                 model = Settings.DEFAULT_MODEL
                 backup = Settings.DEFAULT_BACKUP_MODEL
                 textModel = Settings.DEFAULT_TEXT_MODEL
+                sttModel = Settings.DEFAULT_STT_MODEL
+                sttUrl = Settings.DEFAULT_STT_BASE_URL
             }) { Text("Reset endpoint and model to defaults") }
         }
     }

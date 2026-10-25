@@ -57,11 +57,12 @@ class NvidiaCaptioner(
         title: String?,
         author: String?,
         onScreenText: String,
+        transcript: String = "",
     ): Result = withContext(Dispatchers.IO) {
         val pick = CaptionStyle.next(settings)
-        val prompt = CaptionPrompt.build(pick.povLabel, pick.styleMode, title, author, onScreenText)
+        val prompt = CaptionPrompt.build(pick.povLabel, pick.styleMode, title, author, onScreenText, transcript)
         val models = listOf(settings.model, settings.backupModel)
-        run(models, prompt, Base64.encodeToString(jpeg, Base64.NO_WRAP), contextOf(title, onScreenText))
+        run(models, prompt, Base64.encodeToString(jpeg, Base64.NO_WRAP), contextOf(title, onScreenText) + " " + transcript)
     }
 
     /** Text path: no image. Text model first, then the main vision model as a fallback. */

@@ -9,6 +9,7 @@ import coil.decode.VideoFrameDecoder
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import com.scoopz.app.caption.NvidiaCaptioner
+import com.scoopz.app.caption.Transcriber
 import com.scoopz.app.caption.RateLimiter
 import com.scoopz.app.data.ScoopzDb
 import com.scoopz.app.error.ErrorAi
@@ -36,6 +37,10 @@ class Graph(app: Application) {
     val captioner = NvidiaCaptioner(http, settings, limiter)
     val errorAi = ErrorAi(http, settings, limiter)
     val modelFinder = ModelFinder(http, settings, limiter)
+
+    /** Transcription has its own provider and its own limit (Groq free tier is ~20 requests/min). */
+    val sttLimiter = RateLimiter { 15 }
+    val transcriber = Transcriber(http, settings, sttLimiter)
 }
 
 class ScoopzApp : Application(), ImageLoaderFactory {

@@ -39,7 +39,9 @@ Vision models are the slow part on NVIDIA's free tier, so captions are written *
 
 Trade-off: text mode can't describe an action that isn't in the title, text or labels. That is what the Vision button is for.
 
-**Audio / transcript:** not implemented yet. The prompt already has a slot for spoken words, so a transcript can be added without changing the rest. Options are an on-device model such as Vosk or Whisper (offline, but a 50-100 MB download) or a free hosted Whisper service with its own key.
+**Audio / transcript (optional):** add a free Groq key in Settings → Transcription. The app copies the video's audio track into a small .m4a on the phone (no re-encoding, about 256 KB of memory), uploads only that audio to Whisper (`whisper-large-v3-turbo`), and feeds the spoken words to the text model. Transcription runs in parallel with the frame scan, so it adds almost no wait. Silence or music returns nothing and is ignored. A transcription failure never blocks the caption; the last problem shows under the key field. NVIDIA's own speech models are gRPC-only, so they can't be called like the chat models; the base URL and model are editable if you want another OpenAI-compatible provider.
+
+**Redo is instant-ish:** on-screen text, labels and the transcript are cached per video, so Redo only makes one text request.
 
 ### Optimization techniques
 
@@ -72,7 +74,6 @@ Trade-off: text mode can't describe an action that isn't in the title, text or l
 **Planned**
 - Instant text-only draft captions from the TikTok title, with an optional vision upgrade.
 - A second free provider as a further fallback.
-- Audio transcription.
 
 ### Error handling
 
@@ -123,7 +124,7 @@ Notes:
 - Free vision models take one image per request, so the picked frames are stitched side by side (kept under ~140 KB).
 - Requests time out after about 45 s and are retried on the **backup model** (Settings). Names in captions come from the TikTok title, hashtags and on-screen text. The app never identifies people from faces.
 - If you get HTTP 403, open the model's page on build.nvidia.com and use *Try API* once to enable it for your key.
-- Audio transcription is not implemented (no free speech-to-text model found); captions use frames only.
+- Transcription needs a separate free Groq key (NVIDIA speech models are gRPC-only). Check Groq's current free limits (about 20 requests/min was listed by a third party).
 
 ### Developer setup
 
@@ -196,7 +197,6 @@ Key dependencies: Compose Material 3, Room, WorkManager, OkHttp, Coil (+ video f
 ### Known gaps
 
 - The Android project has not been compiled yet; expect a few first-build fixes.
-- No audio transcription.
 - No unit tests yet (good first targets: `LinkParser`, `Hashtags`, `CaptionStyle`).
 
 ---
