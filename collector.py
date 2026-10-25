@@ -100,6 +100,9 @@ class DownloadStats:
     start_time: float = field(default_factory=time.time)
 
 
+DOWNLOAD_DEADLINE = 180  # seconds allowed for one video, however slowly it trickles in
+
+
 class TikWMClient:
     def __init__(self):
         self.session = requests.Session()
@@ -182,8 +185,15 @@ class VideoDownloader:
                 if "text/html" in content_type or "application/json" in content_type:
                     return False, f"Invalid content-type: {content_type}"
 
+                # Stream in chunks with an overall deadline: a per-read timeout alone never fires
+                # when a server keeps trickling bytes, which would freeze this worker forever.
+                deadline = time.time() + DOWNLOAD_DEADLINE
                 with open(output_path, "wb") as f:
-                    shutil.copyfileobj(resp.raw, f)
+                    for chunk in resp.iter_content(chunk_size=64 * 1024):
+                        if chunk:
+                            f.write(chunk)
+                        if time.time() > deadline:
+                            return False, "Download timeout"
 
                 return True, ""
         except requests.exceptions.Timeout:
