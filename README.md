@@ -89,6 +89,17 @@ How it works: `ErrorExplainer.encode()` runs where a job fails and stores `CODE`
 
 **Ask AI** sends only the error text to your NVIDIA model (main model, then backup) and shows a short plain-language explanation in a dialog. Tokens, API keys and links are redacted first, and no video or caption data is sent. It is hidden for errors where it can't help (no key, no internet, storage). To add a new known error, add a row in `error/ErrorExplainer.kt` and a matching rule in `classify()`.
 
+### Find models (pick the fastest working model)
+
+Model names on NVIDIA's free tier change, and what your key can use differs from guides. **Settings, then Find models** checks it for you:
+
+1. It asks NVIDIA which models your key can see and keeps the ones that look like vision models. If the list can't be read, it tests a built-in list of guesses instead.
+2. Each candidate gets a tiny solid-red test picture and the question "what colour is this?". A correct answer proves the model really takes images. Two tests run at a time, spaced by the same rate limiter as captions.
+3. You get a list sorted by speed. Failures say why (not enabled for your key, not available, timed out, not a vision model).
+4. Tap **Set as main** or **Set as backup**, or **Use fastest two** to fill both at once. You can also type any model name to test it. The models currently in Settings are always included for comparison.
+
+Notes: speeds vary through the day (the screen shows when they were measured, so use **Test again**), and the test measures speed and basic vision ability, not caption quality. Only a generated test image is sent.
+
 ### Captioning with NVIDIA free endpoints
 
 1. Create a free key at <https://build.nvidia.com> (Settings → API Keys).
@@ -150,6 +161,7 @@ android/
     work/                     # DownloadWorker, CaptionWorker, Enqueue helpers
     media/FramePicker.kt      # Picks the best 1-2 frames (ML Kit faces + text)
     error/                    # Error matrix (ErrorExplainer) + optional AI explanations (ErrorAi)
+    models/ModelFinder.kt     # Lists and speed-tests vision models for your key
     caption/                  # NVIDIA client, prompt, POV/style rotation, hashtag rules, rate limiter
     ui/                       # Library + Settings screens, ViewModel
     util/LinkParser.kt        # Extract TikTok links from shared text

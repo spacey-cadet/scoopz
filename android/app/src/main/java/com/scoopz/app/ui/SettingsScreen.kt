@@ -33,7 +33,7 @@ import com.scoopz.app.data.Settings
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SettingsScreen(onBack: () -> Unit) {
+fun SettingsScreen(onBack: () -> Unit, onFindModels: () -> Unit) {
     val s = ScoopzApp.graph.settings
     var key by remember { mutableStateOf(s.apiKey) }
     var backup by remember { mutableStateOf(s.backupModel) }
@@ -84,6 +84,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                 supportingText = { Text("Used automatically if the main model is slow or fails. Blank = off") },
                 singleLine = true,
             )
+            TextButton(onClick = { save(); onFindModels() }) { Text("Find models: test which ones work and how fast") }
             OutlinedTextField(
                 baseUrl, { baseUrl = it }, Modifier.fillMaxWidth(),
                 label = { Text("Base URL") }, singleLine = true,
