@@ -15,12 +15,16 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+        // Phones from the last ~8 years are arm64. Dropping the other CPU types removes their native libraries.
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            // Signed with the debug key so the release APK installs without setting up a keystore.
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
