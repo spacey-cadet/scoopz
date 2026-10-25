@@ -15,12 +15,16 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "0.1.0"
+        // Phones from the last ~8 years are arm64. Dropping the other CPU types removes their native libraries.
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
 
     buildTypes {
         release {
             isMinifyEnabled = true
             isShrinkResources = true
+            // Signed with the debug key so the release APK installs without setting up a keystore.
+            signingConfig = signingConfigs.getByName("debug")
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
@@ -32,6 +36,10 @@ android {
     kotlinOptions { jvmTarget = "17" }
 
     buildFeatures { compose = true }
+
+    // Store native libraries compressed inside the APK. By default they are stored uncompressed,
+    // which makes the file you send (about 123 MB) far bigger than what actually downloads (about 54 MB).
+    packaging { jniLibs { useLegacyPackaging = true } }
 }
 
 dependencies {
@@ -62,8 +70,9 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.8.1")
 
-    // On-device (bundled models, no network) face and text detection for picking the best frames.
-    implementation("com.google.mlkit:face-detection:16.1.7")
-    implementation("com.google.mlkit:text-recognition:16.0.1")
+    // On-device face and text detection for picking the best frames. These two use the Google Play
+    // services versions: the models are downloaded once by Play services and shared, not packed in the APK.
+    implementation("com.google.android.gms:play-services-mlkit-face-detection:17.1.0")
+    implementation("com.google.android.gms:play-services-mlkit-text-recognition:19.0.1")
     implementation("com.google.mlkit:image-labeling:17.0.9")
 }
