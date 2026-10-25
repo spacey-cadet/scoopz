@@ -17,11 +17,16 @@ import java.io.InterruptedIOException
 import java.util.concurrent.TimeUnit
 
 /**
- * Captions the picked frames through NVIDIA's OpenAI-compatible endpoint
+ * Writes captions through NVIDIA's OpenAI-compatible endpoint
  * (https://integrate.api.nvidia.com/v1 by default, free key from build.nvidia.com).
  *
- * A request that times out or fails is retried on the backup model instead of
- * making the user wait, so a stuck model costs ~45 s, not minutes.
+ * Two paths:
+ *  - [captionText]: fast. No image; the model works from the TikTok title, on-screen text,
+ *    on-device image labels and (later) a transcript.
+ *  - [caption]: slower. Sends the picked frame(s) to a vision model.
+ *
+ * A model that times out or fails is replaced by the next one in the chain instead of
+ * making the user wait.
  */
 class NvidiaCaptioner(
     private val http: OkHttpClient,
@@ -33,35 +38,59 @@ class NvidiaCaptioner(
     /** This model could not answer; trying another model may work. Other IOExceptions are fatal. */
     private class ModelFailed(message: String) : IOException(message)
 
-    private val fastHttp: OkHttpClient = http.newBuilder()
+    private val visionHttp: OkHttpClient = http.newBuilder()
         .readTimeout(45, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
         .callTimeout(60, TimeUnit.SECONDS)
         .build()
 
+    /** Text requests are small, so give up on a stuck one sooner. */
+    private val textHttp: OkHttpClient = http.newBuilder()
+        .readTimeout(25, TimeUnit.SECONDS)
+        .writeTimeout(15, TimeUnit.SECONDS)
+        .callTimeout(30, TimeUnit.SECONDS)
+        .build()
+
+    /** Vision path: frames + TikTok info. Main vision model, then the backup. */
     suspend fun caption(
         jpeg: ByteArray,
         title: String?,
         author: String?,
         onScreenText: String,
+        transcript: String = "",
     ): Result = withContext(Dispatchers.IO) {
+        val pick = CaptionStyle.next(settings)
+        val prompt = CaptionPrompt.build(pick.povLabel, pick.styleMode, title, author, onScreenText, transcript)
+        val models = listOf(settings.model, settings.backupModel)
+        run(models, prompt, Base64.encodeToString(jpeg, Base64.NO_WRAP), contextOf(title, onScreenText) + " " + transcript)
+    }
+
+    /** Text path: no image. Text model first, then the main vision model as a fallback. */
+    suspend fun captionText(
+        title: String?,
+        author: String?,
+        onScreenText: String,
+        labels: List<String>,
+        transcript: String = "",
+    ): Result = withContext(Dispatchers.IO) {
+        val pick = CaptionStyle.next(settings)
+        val prompt = CaptionPrompt.buildText(pick.povLabel, pick.styleMode, title, author, onScreenText, labels, transcript)
+        val models = listOf(settings.textModel, settings.model)
+        run(models, prompt, null, contextOf(title, onScreenText) + " " + labels.joinToString(" ") + " " + transcript)
+    }
+
+    private fun contextOf(title: String?, onScreenText: String) = listOfNotNull(title, onScreenText).joinToString(" ")
+
+    private suspend fun run(models: List<String>, prompt: String, b64: String?, contextText: String): Result {
         val key = settings.apiKey
         if (key.isBlank()) throw IOException("Add your NVIDIA API key in Settings")
 
-        val b64 = Base64.encodeToString(jpeg, Base64.NO_WRAP)
-        val pick = CaptionStyle.next(settings)
-        val prompt = CaptionPrompt.build(pick.povLabel, pick.styleMode, title, author, onScreenText)
-        // Title, hashtags and on-screen text also seed the video-specific hashtags.
-        val contextText = listOfNotNull(title, onScreenText).joinToString(" ")
-
-        val models = listOf(settings.model, settings.backupModel)
-            .map { it.trim() }.filter { it.isNotEmpty() }.distinct()
-
-        // Keep every model's error so the card shows why the main model failed, not just the backup.
+        val chain = models.map { it.trim() }.filter { it.isNotEmpty() }.distinct()
+        // Keep every model's error so the card shows why the first one failed, not just the last.
         val failures = mutableListOf<String>()
-        for (model in models) {
+        for (model in chain) {
             try {
-                return@withContext callModel(model, key, prompt, b64, contextText)
+                return callModel(model, key, prompt, b64, contextText)
             } catch (e: ModelFailed) {
                 failures += e.message.orEmpty().take(140)
             }
@@ -69,7 +98,8 @@ class NvidiaCaptioner(
         throw IOException(failures.joinToString("\n").ifBlank { "No model configured" })
     }
 
-    private suspend fun callModel(model: String, key: String, prompt: String, b64: String, contextText: String): Result {
+    private suspend fun callModel(model: String, key: String, prompt: String, b64: String?, contextText: String): Result {
+        val client = if (b64 == null) textHttp else visionHttp
         var inlineImg = false
         var rateLimited = 0
         while (true) {
@@ -82,7 +112,7 @@ class NvidiaCaptioner(
                 .build()
 
             val resp = try {
-                fastHttp.newCall(req).execute()
+                client.newCall(req).execute()
             } catch (e: CancellationException) {
                 throw e
             } catch (e: InterruptedIOException) {
@@ -93,7 +123,11 @@ class NvidiaCaptioner(
 
             val code = resp.code
             val retryAfter = resp.header("Retry-After")?.toLongOrNull()
-            val text = resp.use { it.body?.string().orEmpty() }
+            val text = try {
+                resp.use { it.body?.string().orEmpty() }
+            } catch (e: InterruptedIOException) {
+                throw ModelFailed("$model took too long to answer")
+            }
 
             when {
                 code in 200..299 -> return parse(text, contextText)
@@ -104,7 +138,7 @@ class NvidiaCaptioner(
                     delay(wait)
                 }
                 code == 429 -> throw ModelFailed("$model is rate limited, try again in a minute")
-                code == 400 && !inlineImg -> inlineImg = true // some models want the <img src="data:..."> form
+                code == 400 && b64 != null && !inlineImg -> inlineImg = true // some models want the <img src="data:..."> form
                 code == 401 -> throw IOException("NVIDIA rejected your API key (HTTP 401). Check it in Settings.")
                 code == 403 -> throw ModelFailed("$model is not enabled for your key (HTTP 403). Open it on build.nvidia.com and use Try API once.")
                 code == 404 -> throw ModelFailed("$model is not available to your account (HTTP 404). Choose another model in Settings.")
@@ -113,11 +147,11 @@ class NvidiaCaptioner(
         }
     }
 
-    private fun buildBody(model: String, prompt: String, b64: String, inlineImg: Boolean): JSONObject {
-        val content: Any = if (inlineImg) {
-            "$prompt <img src=\"data:image/jpeg;base64,$b64\" />"
-        } else {
-            JSONArray()
+    private fun buildBody(model: String, prompt: String, b64: String?, inlineImg: Boolean): JSONObject {
+        val content: Any = when {
+            b64 == null -> prompt
+            inlineImg -> "$prompt <img src=\"data:image/jpeg;base64,$b64\" />"
+            else -> JSONArray()
                 .put(
                     JSONObject().put("type", "image_url")
                         .put("image_url", JSONObject().put("url", "data:image/jpeg;base64,$b64"))

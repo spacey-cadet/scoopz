@@ -65,4 +65,5 @@ dependencies {
     // On-device (bundled models, no network) face and text detection for picking the best frames.
     implementation("com.google.mlkit:face-detection:16.1.7")
     implementation("com.google.mlkit:text-recognition:16.0.1")
+    implementation("com.google.mlkit:image-labeling:17.0.9")
 }

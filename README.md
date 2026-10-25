@@ -29,6 +29,20 @@ Scoopz started as a Termux workflow (two Python scripts plus a share-sheet trick
 - Thumbnail memory cache is capped at 12% of app memory; the disk cache at 64 MB.
 - Download and caption concurrency are bounded by semaphores, and API calls are spaced by a rate limiter.
 
+### Caption modes: text first, vision on demand
+
+Vision models are the slow part on NVIDIA's free tier, so captions are written **text first**:
+
+1. **On the phone** (free, offline, instant): the best frame is picked, ML Kit reads any on-screen text and adds a few generic image labels ("crowd", "microphone").
+2. **Text model** (default `meta/llama-3.1-8b-instruct`, a guess you can confirm with Find models): writes the caption from the TikTok title, uploader, hashtags, on-screen text and labels. No image is sent, so it answers in seconds and rarely times out. If it fails, the main vision model is tried.
+3. **Vision model** is used when you tap **Vision** on a card, turn on *Always use the vision model* in Settings, or when a video has almost no text information (no real title and nothing readable on screen).
+
+Trade-off: text mode can't describe an action that isn't in the title, text or labels. That is what the Vision button is for.
+
+**Audio / transcript (optional):** add a free Groq key in Settings → Transcription. The app copies the video's audio track into a small .m4a on the phone (no re-encoding, about 256 KB of memory), uploads only that audio to Whisper (`whisper-large-v3-turbo`), and feeds the spoken words to the text model. Transcription runs in parallel with the frame scan, so it adds almost no wait. Silence or music returns nothing and is ignored. A transcription failure never blocks the caption; the last problem shows under the key field. NVIDIA's own speech models are gRPC-only, so they can't be called like the chat models; the base URL and model are editable if you want another OpenAI-compatible provider.
+
+**Redo is instant-ish:** on-screen text, labels and the transcript are cached per video, so Redo only makes one text request.
+
 ### Optimization techniques
 
 **Downloads**
@@ -60,7 +74,6 @@ Scoopz started as a Termux workflow (two Python scripts plus a share-sheet trick
 **Planned**
 - Instant text-only draft captions from the TikTok title, with an optional vision upgrade.
 - A second free provider as a further fallback.
-- Audio transcription.
 
 ### Error handling
 
@@ -111,7 +124,7 @@ Notes:
 - Free vision models take one image per request, so the picked frames are stitched side by side (kept under ~140 KB).
 - Requests time out after about 45 s and are retried on the **backup model** (Settings). Names in captions come from the TikTok title, hashtags and on-screen text. The app never identifies people from faces.
 - If you get HTTP 403, open the model's page on build.nvidia.com and use *Try API* once to enable it for your key.
-- Audio transcription is not implemented (no free speech-to-text model found); captions use frames only.
+- Transcription needs a separate free Groq key (NVIDIA speech models are gRPC-only). Check Groq's current free limits (about 20 requests/min was listed by a third party).
 
 ### Developer setup
 
@@ -184,7 +197,6 @@ Key dependencies: Compose Material 3, Room, WorkManager, OkHttp, Coil (+ video f
 ### Known gaps
 
 - The Android project has not been compiled yet; expect a few first-build fixes.
-- No audio transcription.
 - No unit tests yet (good first targets: `LinkParser`, `Hashtags`, `CaptionStyle`).
 
 ---

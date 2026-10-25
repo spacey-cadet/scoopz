@@ -37,20 +37,30 @@ fun SettingsScreen(onBack: () -> Unit, onFindModels: () -> Unit) {
     val s = ScoopzApp.graph.settings
     var key by remember { mutableStateOf(s.apiKey) }
     var backup by remember { mutableStateOf(s.backupModel) }
+    var textModel by remember { mutableStateOf(s.textModel) }
+    var visionAlways by remember { mutableStateOf(s.visionAlways) }
     var baseUrl by remember { mutableStateOf(s.baseUrl) }
     var model by remember { mutableStateOf(s.model) }
     var rpm by remember { mutableStateOf(s.requestsPerMinute.toString()) }
     var auto by remember { mutableStateOf(s.autoCaption) }
     var twoFrames by remember { mutableStateOf(s.twoFrames) }
+    var sttKey by remember { mutableStateOf(s.sttKey) }
+    var sttModel by remember { mutableStateOf(s.sttModel) }
+    var sttUrl by remember { mutableStateOf(s.sttBaseUrl) }
 
     fun save() {
         s.apiKey = key
         s.baseUrl = baseUrl
         s.model = model
         s.backupModel = backup
+        s.textModel = textModel
+        s.visionAlways = visionAlways
         s.requestsPerMinute = rpm.toIntOrNull() ?: 30
         s.autoCaption = auto
         s.twoFrames = twoFrames
+        s.sttKey = sttKey
+        s.sttModel = sttModel.ifBlank { Settings.DEFAULT_STT_MODEL }
+        s.sttBaseUrl = sttUrl.ifBlank { Settings.DEFAULT_STT_BASE_URL }
     }
 
     BackHandler { save(); onBack() }
@@ -84,6 +94,16 @@ fun SettingsScreen(onBack: () -> Unit, onFindModels: () -> Unit) {
                 supportingText = { Text("Used automatically if the main model is slow or fails. Blank = off") },
                 singleLine = true,
             )
+            OutlinedTextField(
+                textModel, { textModel = it }, Modifier.fillMaxWidth(),
+                label = { Text("Text model (fast captions)") },
+                supportingText = { Text("Writes captions from the title, on-screen text and labels. No image is sent.") },
+                singleLine = true,
+            )
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Always use the vision model (slower)", Modifier.weight(1f))
+                Switch(visionAlways, { visionAlways = it })
+            }
             TextButton(onClick = { save(); onFindModels() }) { Text("Find models: test which ones work and how fast") }
             OutlinedTextField(
                 baseUrl, { baseUrl = it }, Modifier.fillMaxWidth(),
@@ -103,11 +123,37 @@ fun SettingsScreen(onBack: () -> Unit, onFindModels: () -> Unit) {
                 Text("Send 2 frames per caption (slower, more context)", Modifier.weight(1f))
                 Switch(twoFrames, { twoFrames = it })
             }
+            Text("Transcription (optional, biggest caption boost)")
+            Text(
+                "Reads what is said in the video so captions match the content. Free key at console.groq.com. " +
+                    "Leave blank to skip it.",
+            )
+            OutlinedTextField(
+                sttKey, { sttKey = it }, Modifier.fillMaxWidth(),
+                label = { Text("Transcription API key (Groq)") },
+                singleLine = true,
+                visualTransformation = PasswordVisualTransformation(),
+                supportingText = {
+                    val err = s.sttLastError
+                    Text(if (err.isBlank()) "Only the audio track is uploaded, never the video." else "Last problem: $err")
+                },
+            )
+            OutlinedTextField(
+                sttModel, { sttModel = it }, Modifier.fillMaxWidth(),
+                label = { Text("Transcription model") }, singleLine = true,
+            )
+            OutlinedTextField(
+                sttUrl, { sttUrl = it }, Modifier.fillMaxWidth(),
+                label = { Text("Transcription base URL") }, singleLine = true,
+            )
             Button(onClick = { save(); onBack() }, Modifier.fillMaxWidth()) { Text("Save") }
             TextButton(onClick = {
                 baseUrl = Settings.DEFAULT_BASE_URL
                 model = Settings.DEFAULT_MODEL
                 backup = Settings.DEFAULT_BACKUP_MODEL
+                textModel = Settings.DEFAULT_TEXT_MODEL
+                sttModel = Settings.DEFAULT_STT_MODEL
+                sttUrl = Settings.DEFAULT_STT_BASE_URL
             }) { Text("Reset endpoint and model to defaults") }
         }
     }

@@ -8,6 +8,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -106,6 +108,7 @@ fun LibraryScreen(vm: LibraryViewModel, onOpenSettings: () -> Unit) {
                         onRetry = { vm.retry(v.sourceUrl) },
                         onDelete = { vm.delete(v) },
                         onCopy = { copy(ctx, captionText(v).orEmpty()) },
+                        onVision = { vm.captionVision(v.sourceUrl) },
                         onOpenSettings = onOpenSettings,
                         onExplain = vm::explainWithAi,
                     )
@@ -115,7 +118,7 @@ fun LibraryScreen(vm: LibraryViewModel, onOpenSettings: () -> Unit) {
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalFoundationApi::class, ExperimentalLayoutApi::class)
 @Composable
 private fun VideoCard(
     v: VideoEntity,
@@ -125,6 +128,7 @@ private fun VideoCard(
     onRetry: () -> Unit,
     onDelete: () -> Unit,
     onCopy: () -> Unit,
+    onVision: () -> Unit,
     onOpenSettings: () -> Unit,
     onExplain: (Stage, String) -> Unit,
 ) {
@@ -182,10 +186,12 @@ private fun VideoCard(
                             CaptionState.FAILED -> ErrorPanel(v.error, Stage.CAPTION, onOpenSettings, onExplain)
                             CaptionState.NONE -> Text("No caption yet", style = MaterialTheme.typography.bodySmall)
                         }
-                        Row {
+                        FlowRow {
                             TextButton(onClick = onCaption) {
                                 Text(if (v.captionState == CaptionState.DONE) "Redo" else "Caption")
                             }
+                            // Looks at the actual frame: slower, but sees what the title and text don't say.
+                            TextButton(onClick = onVision) { Text("Vision") }
                             if (v.captionState == CaptionState.DONE) TextButton(onClick = onCopy) { Text("Copy") }
                             TextButton(onClick = onDelete) { Text("Delete") }
                         }

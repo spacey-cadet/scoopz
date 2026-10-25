@@ -35,6 +35,34 @@ class Settings(context: Context) {
         }
         set(v) = prefs.edit().putString("backup_model", v.trim()).apply()
 
+    /** Optional speech-to-text (any OpenAI-compatible endpoint; default Groq's free Whisper). Blank key = off. */
+    var sttKey: String
+        get() = prefs.getString("stt_key", "") ?: ""
+        set(v) = prefs.edit().putString("stt_key", v.trim()).apply()
+
+    var sttModel: String
+        get() = prefs.getString("stt_model", DEFAULT_STT_MODEL) ?: DEFAULT_STT_MODEL
+        set(v) = prefs.edit().putString("stt_model", v.trim()).apply()
+
+    var sttBaseUrl: String
+        get() = prefs.getString("stt_base_url", DEFAULT_STT_BASE_URL) ?: DEFAULT_STT_BASE_URL
+        set(v) = prefs.edit().putString("stt_base_url", v.trim().trimEnd('/')).apply()
+
+    /** Last transcription problem, shown in Settings so a bad key doesn't fail silently. */
+    var sttLastError: String
+        get() = prefs.getString("stt_last_error", "") ?: ""
+        set(v) = prefs.edit().putString("stt_last_error", v).apply()
+
+    /** Fast text-only model: writes captions from the title, on-screen text and image labels (no image sent). */
+    var textModel: String
+        get() = prefs.getString("text_model", DEFAULT_TEXT_MODEL) ?: DEFAULT_TEXT_MODEL
+        set(v) = prefs.edit().putString("text_model", v.trim()).apply()
+
+    /** On = always use the vision model (slower). Off = text first, vision only when info is thin or asked for. */
+    var visionAlways: Boolean
+        get() = prefs.getBoolean("vision_always", false)
+        set(v) = prefs.edit().putBoolean("vision_always", v).apply()
+
     /** Off = send only the single best frame (fastest). On = best two frames, slower. */
     var twoFrames: Boolean
         get() = prefs.getBoolean("two_frames", false)
@@ -62,6 +90,9 @@ class Settings(context: Context) {
         const val DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
         const val DEFAULT_MODEL = "meta/llama-3.2-11b-vision-instruct"
         const val DEFAULT_BACKUP_MODEL = "" // off until you choose a model that works on your key
+        const val DEFAULT_STT_BASE_URL = "https://api.groq.com/openai/v1"
+        const val DEFAULT_STT_MODEL = "whisper-large-v3-turbo"
+        const val DEFAULT_TEXT_MODEL ="meta/llama-3.1-8b-instruct" // a guess: confirm it with Find models
         private const val RETIRED_BACKUP_MODEL = "microsoft/phi-3-vision-128k-instruct"
     }
 }

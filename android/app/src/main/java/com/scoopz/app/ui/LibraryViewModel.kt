@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.scoopz.app.ScoopzApp
+import com.scoopz.app.caption.ContextCache
 import com.scoopz.app.data.VideoEntity
 import com.scoopz.app.error.AiState
 import com.scoopz.app.error.Stage
@@ -76,6 +77,9 @@ class LibraryViewModel(private val app: Application) : AndroidViewModel(app) {
     fun retry(url: String) = viewModelScope.launch { Enqueue.retry(app, url) }
     fun caption(url: String) = viewModelScope.launch { Enqueue.recaption(app, url) }
 
+    /** Re-caption using the slower vision model (looks at the actual frame). */
+    fun captionVision(url: String) = viewModelScope.launch { Enqueue.recaption(app, url, vision = true) }
+
     fun captionSelected() {
         val urls = _selected.value
         urls.forEach { caption(it) }
@@ -84,6 +88,7 @@ class LibraryViewModel(private val app: Application) : AndroidViewModel(app) {
     fun delete(v: VideoEntity) = viewModelScope.launch {
         v.mediaUri?.let { runCatching { app.contentResolver.delete(Uri.parse(it), null, null) } }
         dao.delete(v.sourceUrl)
+        ContextCache.delete(app, v.sourceUrl)
         _selected.update { it - v.sourceUrl }
     }
 

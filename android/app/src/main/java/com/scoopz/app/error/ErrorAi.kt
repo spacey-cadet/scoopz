@@ -41,6 +41,7 @@ class ErrorAi(
         val prompt = buildPrompt(stage, redact(rawError))
         val models = listOf(settings.model, settings.backupModel).map { it.trim() }.filter { it.isNotEmpty() }.distinct()
 
+        val problems = mutableListOf<String>()
         for (model in models) {
             try {
                 limiter.acquire()
@@ -61,15 +62,19 @@ class ErrorAi(
                         val answer = JSONObject(text).getJSONArray("choices").getJSONObject(0)
                             .getJSONObject("message").optString("content").trim()
                         if (answer.isNotEmpty()) return@withContext answer.replace("**", "")
+                        problems += "$model: empty answer"
+                    } else {
+                        problems += "$model: HTTP ${resp.code}"
                     }
                 }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                // try the next model
+                problems += "$model: " + if (e is java.io.InterruptedIOException) "timed out" else (e.message ?: e.javaClass.simpleName)
             }
         }
-        throw IOException("AI explanation isn't available right now. The suggested fix on the card still applies.")
+        val why = problems.joinToString("; ").ifBlank { "no model is set" }.take(220)
+        throw IOException("AI explanation isn't available right now ($why). The suggested fix on the card still applies.")
     }
 
     private fun buildPrompt(stage: Stage, error: String): String = """

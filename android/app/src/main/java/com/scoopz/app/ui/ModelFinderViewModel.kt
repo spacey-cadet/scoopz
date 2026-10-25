@@ -20,7 +20,11 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import java.time.LocalTime
 
-data class ModelRow(val model: String, val probe: Probe)
+enum class Kind { VISION, TEXT }
+
+data class ModelRow(val model: String, val probe: Probe, val kind: Kind = Kind.VISION) {
+    val key: String get() = "${kind.name}:$model"
+}
 
 data class FinderUi(
     val running: Boolean = false,
@@ -28,18 +32,24 @@ data class FinderUi(
     val rows: List<ModelRow> = emptyList(),
     val main: String = "",
     val backup: String = "",
+    val textModel: String = "",
     val measuredAt: String? = null,
 ) {
-    val working: List<ModelRow> get() = rows.filter { it.probe is Probe.Ok }.sortedBy { (it.probe as Probe.Ok).ms }
+    val working: List<ModelRow>
+        get() = rows.filter { it.kind == Kind.VISION && it.probe is Probe.Ok }.sortedBy { (it.probe as Probe.Ok).ms }
+    val workingText: List<ModelRow>
+        get() = rows.filter { it.kind == Kind.TEXT && it.probe is Probe.Ok }.sortedBy { (it.probe as Probe.Ok).ms }
 }
 
 class ModelFinderViewModel(app: Application) : AndroidViewModel(app) {
     private val g = ScoopzApp.graph
-    private val _ui = MutableStateFlow(FinderUi(main = g.settings.model, backup = g.settings.backupModel))
+    private val _ui = MutableStateFlow(
+        FinderUi(main = g.settings.model, backup = g.settings.backupModel, textModel = g.settings.textModel)
+    )
     val ui: StateFlow<FinderUi> = _ui
     private var job: Job? = null
 
-    /** Lists the models the key can see, keeps the vision-looking ones, and times each. */
+    /** Lists the models the key can see, keeps likely vision and text models, and times each. */
     fun start() {
         if (_ui.value.running) return
         if (g.settings.apiKey.isBlank()) {
@@ -50,8 +60,12 @@ class ModelFinderViewModel(app: Application) : AndroidViewModel(app) {
             _ui.update { it.copy(running = true, note = "Asking NVIDIA which models your key can use...", rows = emptyList(), measuredAt = null) }
 
             var note: String? = null
-            val listed = try {
-                g.modelFinder.listModels()
+            var visionList: List<String> = emptyList()
+            var textList: List<String> = emptyList()
+            try {
+                val listed = g.modelFinder.listModels()
+                visionList = g.modelFinder.candidates(listed)
+                textList = g.modelFinder.textCandidates(listed)
             } catch (e: AuthFailed) {
                 _ui.update { it.copy(running = false, note = e.message) }
                 return@launch
@@ -59,30 +73,33 @@ class ModelFinderViewModel(app: Application) : AndroidViewModel(app) {
                 throw e
             } catch (e: Exception) {
                 note = "Couldn't read NVIDIA's model list (${e.message}). Testing a built-in list of guesses instead."
-                ModelFinder.SEED
+                visionList = ModelFinder.SEED
+                textList = ModelFinder.TEXT_SEED
             }
 
             // Always include the models currently in Settings so you can see how they compare.
-            val names = (listOf(g.settings.model, g.settings.backupModel).filter { it.isNotBlank() } +
-                g.modelFinder.candidates(listed)).distinct()
-            if (names.isEmpty()) {
-                _ui.update { it.copy(running = false, note = "No likely vision models found. Type a model name below to test it.") }
+            val s = g.settings
+            val vision = (listOf(s.model, s.backupModel).filter { it.isNotBlank() } + visionList).distinct()
+            val text = (listOf(s.textModel).filter { it.isNotBlank() } + textList).distinct()
+            val items = vision.map { it to Kind.VISION } + text.map { it to Kind.TEXT }
+            if (items.isEmpty()) {
+                _ui.update { it.copy(running = false, note = "No likely models found. Type a model name below to test it.") }
                 return@launch
             }
             _ui.update { it.copy(note = note) }
-            testNames(names, clear = true)
+            testItems(items, clear = true)
         }
     }
 
-    /** Tests one model name typed by the user. */
-    fun addCustom(name: String) {
+    /** Tests one model name typed by the user, as a vision or a text model. */
+    fun addCustom(name: String, kind: Kind) {
         val n = name.trim()
         if (n.isEmpty() || _ui.value.running) return
         if (g.settings.apiKey.isBlank()) {
             _ui.update { it.copy(note = "Add your NVIDIA API key in Settings first.") }
             return
         }
-        job = viewModelScope.launch { testNames(listOf(n), clear = false) }
+        job = viewModelScope.launch { testItems(listOf(n to kind), clear = false) }
     }
 
     fun stop() {
@@ -99,28 +116,32 @@ class ModelFinderViewModel(app: Application) : AndroidViewModel(app) {
         _ui.update { it.copy(backup = g.settings.backupModel) }
     }
 
-    fun clearBackup() = setBackup("")
-
-    /** Fastest working model becomes main, the next fastest becomes backup. */
-    fun useFastest() {
-        val fastest = _ui.value.working
-        fastest.getOrNull(0)?.let { setMain(it.model) }
-        fastest.getOrNull(1)?.let { setBackup(it.model) }
+    fun setText(model: String) {
+        g.settings.textModel = model
+        _ui.update { it.copy(textModel = g.settings.textModel) }
     }
 
-    private suspend fun testNames(names: List<String>, clear: Boolean) {
+    /** Fastest working vision model becomes main, the next becomes backup, and the fastest text model is used for text. */
+    fun useFastest() {
+        val vision = _ui.value.working
+        vision.getOrNull(0)?.let { setMain(it.model) }
+        vision.getOrNull(1)?.let { setBackup(it.model) }
+        _ui.value.workingText.getOrNull(0)?.let { setText(it.model) }
+    }
+
+    private suspend fun testItems(items: List<Pair<String, Kind>>, clear: Boolean) {
         _ui.update { u ->
-            val kept = if (clear) emptyList() else u.rows.filterNot { it.model in names }
-            u.copy(running = true, rows = kept + names.map { ModelRow(it, Probe.Pending) })
+            val kept = if (clear) emptyList() else u.rows.filterNot { r -> items.any { it.first == r.model && it.second == r.kind } }
+            u.copy(running = true, rows = kept + items.map { (m, k) -> ModelRow(m, Probe.Pending, k) })
         }
         try {
             coroutineScope {
                 val gate = Semaphore(2) // two at a time, also spaced by the shared rate limiter
-                names.map { m ->
+                items.map { (m, k) ->
                     async {
                         gate.withPermit {
-                            setProbe(m, Probe.Testing)
-                            setProbe(m, g.modelFinder.probe(m))
+                            setProbe(m, k, Probe.Testing)
+                            setProbe(m, k, g.modelFinder.probe(m, textOnly = k == Kind.TEXT))
                         }
                     }
                 }.awaitAll()
@@ -138,7 +159,7 @@ class ModelFinderViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun setProbe(model: String, probe: Probe) {
-        _ui.update { u -> u.copy(rows = u.rows.map { if (it.model == model) it.copy(probe = probe) else it }) }
+    private fun setProbe(model: String, kind: Kind, probe: Probe) {
+        _ui.update { u -> u.copy(rows = u.rows.map { if (it.model == model && it.kind == kind) it.copy(probe = probe) else it }) }
     }
 }
