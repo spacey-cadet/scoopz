@@ -36,6 +36,10 @@ android {
     kotlinOptions { jvmTarget = "17" }
 
     buildFeatures { compose = true }
+
+    // Store native libraries compressed inside the APK. By default they are stored uncompressed,
+    // which makes the file you send (about 123 MB) far bigger than what actually downloads (about 54 MB).
+    packaging { jniLibs { useLegacyPackaging = true } }
 }
 
 dependencies {
