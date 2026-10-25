@@ -29,6 +29,18 @@ Scoopz started as a Termux workflow (two Python scripts plus a share-sheet trick
 - Thumbnail memory cache is capped at 12% of app memory; the disk cache at 64 MB.
 - Download and caption concurrency are bounded by semaphores, and API calls are spaced by a rate limiter.
 
+### Caption modes: text first, vision on demand
+
+Vision models are the slow part on NVIDIA's free tier, so captions are written **text first**:
+
+1. **On the phone** (free, offline, instant): the best frame is picked, ML Kit reads any on-screen text and adds a few generic image labels ("crowd", "microphone").
+2. **Text model** (default `meta/llama-3.1-8b-instruct`, a guess you can confirm with Find models): writes the caption from the TikTok title, uploader, hashtags, on-screen text and labels. No image is sent, so it answers in seconds and rarely times out. If it fails, the main vision model is tried.
+3. **Vision model** is used when you tap **Vision** on a card, turn on *Always use the vision model* in Settings, or when a video has almost no text information (no real title and nothing readable on screen).
+
+Trade-off: text mode can't describe an action that isn't in the title, text or labels. That is what the Vision button is for.
+
+**Audio / transcript:** not implemented yet. The prompt already has a slot for spoken words, so a transcript can be added without changing the rest. Options are an on-device model such as Vosk or Whisper (offline, but a 50-100 MB download) or a free hosted Whisper service with its own key.
+
 ### Optimization techniques
 
 **Downloads**

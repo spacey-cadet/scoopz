@@ -76,6 +76,9 @@ class LibraryViewModel(private val app: Application) : AndroidViewModel(app) {
     fun retry(url: String) = viewModelScope.launch { Enqueue.retry(app, url) }
     fun caption(url: String) = viewModelScope.launch { Enqueue.recaption(app, url) }
 
+    /** Re-caption using the slower vision model (looks at the actual frame). */
+    fun captionVision(url: String) = viewModelScope.launch { Enqueue.recaption(app, url, vision = true) }
+
     fun captionSelected() {
         val urls = _selected.value
         urls.forEach { caption(it) }

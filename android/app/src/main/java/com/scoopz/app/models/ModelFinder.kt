@@ -34,9 +34,10 @@ sealed interface Probe {
 class AuthFailed : IOException("NVIDIA rejected your API key (HTTP 401). Check it in Settings.")
 
 /**
- * Finds which vision models actually work on the user's NVIDIA key, and how fast.
- * Each candidate gets a tiny solid-red picture and the question "what colour is this?".
- * A correct answer proves the model works with images; the elapsed time is its speed.
+ * Finds which models actually work on the user's NVIDIA key, and how fast.
+ *  - Vision models get a tiny solid-red picture and "what colour is this?". A correct answer
+ *    proves the model takes images.
+ *  - Text models get "reply with one word" and are just timed.
  */
 class ModelFinder(
     http: OkHttpClient,
@@ -74,17 +75,30 @@ class ModelFinder(
             VISION_HINTS.any { it in m } && NOT_CHAT.none { it in m }
         }.distinct().take(MAX_CANDIDATES)
 
-    /** Sends the red-square test to [model]. Throws [AuthFailed] on a bad key. */
-    suspend fun probe(model: String): Probe {
+    /** Small chat models first: they are the fastest for writing captions from text. */
+    fun textCandidates(all: List<String>): List<String> =
+        all.filter { id ->
+            val m = id.lowercase()
+            ("instruct" in m || "chat" in m) &&
+                VISION_HINTS.none { it in m } && NOT_CHAT.none { it in m } && TEXT_SKIP.none { it in m }
+        }.distinct()
+            .sortedBy { id -> if (SMALL_HINTS.any { it in id.lowercase() }) 0 else 1 }
+            .take(MAX_TEXT_CANDIDATES)
+
+    /**
+     * Tests [model]. [textOnly] = no image (just times a one-word answer).
+     * Throws [AuthFailed] on a bad key.
+     */
+    suspend fun probe(model: String, textOnly: Boolean = false): Probe {
         var inline = false
         var rateRetried = false
         repeat(4) {
-            when (val a = call(model, inline)) {
+            when (val a = call(model, inline, textOnly)) {
                 is Call.Failed -> return a.probe
                 is Call.Response -> {
                     val code = a.code
                     when {
-                        code in 200..299 -> return judge(a.body, a.ms)
+                        code in 200..299 -> return judge(a.body, a.ms, textOnly)
                         code == 401 -> throw AuthFailed()
                         code == 403 -> return Probe.Failed("Not enabled for your key. Open this model on build.nvidia.com and tap Try API once.")
                         code == 404 -> return Probe.Failed("Not available on your account.")
@@ -93,9 +107,12 @@ class ModelFinder(
                             delay((a.retryAfter ?: 5L).coerceIn(1L, 15L) * 1000)
                         }
                         code == 429 -> return Probe.Failed("Rate limited. Try again in a minute.")
-                        (code == 400 || code == 422) && !inline -> inline = true // try the <img> text form once
+                        (code == 400 || code == 422) && !inline && !textOnly -> inline = true // try the <img> text form once
                         code == 400 || code == 422 ->
-                            return Probe.Failed("Not a vision model, or it uses a different request format (HTTP $code).")
+                            return Probe.Failed(
+                                if (textOnly) "Not a chat model, or it uses a different request format (HTTP $code)."
+                                else "Not a vision model, or it uses a different request format (HTTP $code)."
+                            )
                         else -> return Probe.Failed("HTTP $code")
                     }
                 }
@@ -109,13 +126,13 @@ class ModelFinder(
         class Failed(val probe: Probe) : Call
     }
 
-    private suspend fun call(model: String, inline: Boolean): Call = withContext(Dispatchers.IO) {
+    private suspend fun call(model: String, inline: Boolean, textOnly: Boolean): Call = withContext(Dispatchers.IO) {
         limiter.acquire()
         val req = Request.Builder()
             .url(settings.baseUrl + "/chat/completions")
             .header("Authorization", "Bearer ${settings.apiKey}")
             .header("Accept", "application/json")
-            .post(buildBody(model, inline).toString().toRequestBody("application/json".toMediaType()))
+            .post(buildBody(model, inline, textOnly).toString().toRequestBody("application/json".toMediaType()))
             .build()
         val started = SystemClock.elapsedRealtime()
         try {
@@ -135,11 +152,11 @@ class ModelFinder(
         }
     }
 
-    private fun buildBody(model: String, inline: Boolean): JSONObject {
-        val content: Any = if (inline) {
-            "$QUESTION <img src=\"data:image/jpeg;base64,$testImage\" />"
-        } else {
-            JSONArray()
+    private fun buildBody(model: String, inline: Boolean, textOnly: Boolean): JSONObject {
+        val content: Any = when {
+            textOnly -> TEXT_QUESTION
+            inline -> "$QUESTION <img src=\"data:image/jpeg;base64,$testImage\" />"
+            else -> JSONArray()
                 .put(
                     JSONObject().put("type", "image_url")
                         .put("image_url", JSONObject().put("url", "data:image/jpeg;base64,$testImage"))
@@ -154,13 +171,14 @@ class ModelFinder(
             .put("messages", JSONArray().put(JSONObject().put("role", "user").put("content", content)))
     }
 
-    private fun judge(body: String, ms: Long): Probe {
+    private fun judge(body: String, ms: Long, textOnly: Boolean): Probe {
         val answer = try {
             JSONObject(body).getJSONArray("choices").getJSONObject(0)
                 .getJSONObject("message").optString("content").trim()
         } catch (e: JSONException) {
             return Probe.Failed("Unreadable answer")
         }
+        if (textOnly) return if (answer.isNotEmpty()) Probe.Ok(ms) else Probe.Failed("Empty answer")
         return if ("red" in answer.lowercase()) Probe.Ok(ms) else Probe.Wrong(ms, answer.take(40))
     }
 
@@ -175,7 +193,9 @@ class ModelFinder(
 
     companion object {
         private const val QUESTION = "What is the main color of this image? Reply with one word."
+        private const val TEXT_QUESTION = "Reply with the single word: ready"
         private const val MAX_CANDIDATES = 16
+        private const val MAX_TEXT_CANDIDATES = 8
 
         private val VISION_HINTS = listOf(
             "vision", "-vl", "vl-", "vlm", "vila", "neva", "llava", "pixtral", "paligemma", "kosmos",
@@ -185,6 +205,8 @@ class ModelFinder(
             "embed", "rerank", "guard", "reward", "safety", "tts", "asr", "riva", "retriev", "clip",
             "segment", "diffusion", "flux", "stable", "parse", "ocr", "translate",
         )
+        private val TEXT_SKIP = listOf("coder", "code", "math")
+        private val SMALL_HINTS = listOf("1b", "3b", "7b", "8b", "9b", "mini", "small", "nano", "lite")
 
         /** Used only when the model list can't be read. Names are guesses: failures are shown, not hidden. */
         val SEED = listOf(
@@ -196,6 +218,12 @@ class ModelFinder(
             "meta/llama-4-maverick-17b-128e-instruct",
             "google/gemma-3-27b-it",
             "mistralai/mistral-small-3.1-24b-instruct-2503",
+        )
+        val TEXT_SEED = listOf(
+            "meta/llama-3.1-8b-instruct",
+            "meta/llama-3.2-3b-instruct",
+            "mistralai/mistral-7b-instruct-v0.3",
+            "meta/llama-3.3-70b-instruct",
         )
     }
 }

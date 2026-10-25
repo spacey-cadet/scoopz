@@ -3,6 +3,8 @@ package com.scoopz.app.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -33,7 +35,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.scoopz.app.models.Probe
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun ModelFinderScreen(onBack: () -> Unit) {
     val vm: ModelFinderViewModel = viewModel()
@@ -52,8 +54,8 @@ fun ModelFinderScreen(onBack: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text(
-                "Sends each model that might accept images a tiny test picture and times its answer. " +
-                    "It uses a few of your free requests. Only models that answer correctly are offered.",
+                "Tests vision models with a tiny picture and text models with a one-word question, and times each answer. " +
+                    "It uses a few of your free requests. Text models write the fast captions; vision models are the slower option.",
                 style = MaterialTheme.typography.bodySmall,
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -61,30 +63,40 @@ fun ModelFinderScreen(onBack: () -> Unit) {
                     Text(if (ui.rows.isEmpty()) "Find models" else "Test again")
                 }
                 if (ui.running) TextButton(onClick = vm::stop) { Text("Stop") }
-                if (!ui.running && ui.working.isNotEmpty()) TextButton(onClick = vm::useFastest) { Text("Use fastest two") }
+                if (!ui.running && (ui.working.isNotEmpty() || ui.workingText.isNotEmpty())) {
+                    TextButton(onClick = vm::useFastest) { Text("Use fastest") }
+                }
             }
             ui.note?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
             ui.measuredAt?.let {
                 Text("Measured at $it. Speeds change through the day.", style = MaterialTheme.typography.bodySmall)
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    custom, { custom = it }, Modifier.weight(1f),
-                    label = { Text("Test a model name") }, singleLine = true,
-                )
-                TextButton(onClick = { vm.addCustom(custom); custom = "" }, enabled = !ui.running && custom.isNotBlank()) {
-                    Text("Test")
+            OutlinedTextField(
+                custom, { custom = it }, Modifier.fillMaxWidth(),
+                label = { Text("Test a model name") }, singleLine = true,
+            )
+            FlowRow {
+                TextButton(onClick = { vm.addCustom(custom, Kind.VISION); custom = "" }, enabled = !ui.running && custom.isNotBlank()) {
+                    Text("Test as vision")
+                }
+                TextButton(onClick = { vm.addCustom(custom, Kind.TEXT); custom = "" }, enabled = !ui.running && custom.isNotBlank()) {
+                    Text("Test as text")
                 }
             }
 
             LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(ui.rows.sortedWith(compareBy({ order(it.probe) }, { elapsed(it.probe) })), key = { it.model }) { row ->
+                items(
+                    ui.rows.sortedWith(compareBy({ it.kind }, { order(it.probe) }, { elapsed(it.probe) })),
+                    key = { it.key },
+                ) { row ->
                     ModelCard(
                         row = row,
-                        isMain = row.model == ui.main,
-                        isBackup = row.model == ui.backup,
+                        isMain = row.kind == Kind.VISION && row.model == ui.main,
+                        isBackup = row.kind == Kind.VISION && row.model == ui.backup,
+                        isText = row.kind == Kind.TEXT && row.model == ui.textModel,
                         onMain = { vm.setMain(row.model) },
                         onBackup = { vm.setBackup(row.model) },
+                        onText = { vm.setText(row.model) },
                     )
                 }
             }
@@ -92,13 +104,16 @@ fun ModelFinderScreen(onBack: () -> Unit) {
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ModelCard(
     row: ModelRow,
     isMain: Boolean,
     isBackup: Boolean,
+    isText: Boolean,
     onMain: () -> Unit,
     onBackup: () -> Unit,
+    onText: () -> Unit,
 ) {
     Card(Modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -107,8 +122,13 @@ private fun ModelCard(
                     row.model, Modifier.weight(1f),
                     style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
                 )
+                Text(
+                    if (row.kind == Kind.VISION) "VISION" else "TEXT",
+                    style = MaterialTheme.typography.labelSmall,
+                )
                 if (isMain) Text("MAIN", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall)
                 if (isBackup) Text("BACKUP", color = MaterialTheme.colorScheme.tertiary, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall)
+                if (isText) Text("IN USE", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelSmall)
             }
             when (val p = row.probe) {
                 Probe.Pending -> Text("Waiting...", style = MaterialTheme.typography.bodySmall)
@@ -118,9 +138,13 @@ private fun ModelCard(
                 }
                 is Probe.Ok -> {
                     Text("Works. Answered in ${seconds(p.ms)}", style = MaterialTheme.typography.bodyMedium)
-                    Row {
-                        TextButton(onClick = onMain, enabled = !isMain) { Text("Set as main") }
-                        TextButton(onClick = onBackup, enabled = !isBackup) { Text("Set as backup") }
+                    FlowRow {
+                        if (row.kind == Kind.VISION) {
+                            TextButton(onClick = onMain, enabled = !isMain) { Text("Set as main") }
+                            TextButton(onClick = onBackup, enabled = !isBackup) { Text("Set as backup") }
+                        } else {
+                            TextButton(onClick = onText, enabled = !isText) { Text("Use for fast captions") }
+                        }
                     }
                 }
                 is Probe.Wrong -> Text(

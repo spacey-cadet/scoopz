@@ -36,19 +36,19 @@ object Enqueue {
         download(context, url, ExistingWorkPolicy.REPLACE)
     }
 
-    fun caption(context: Context, url: String) {
+    fun caption(context: Context, url: String, vision: Boolean = false) {
         val req = OneTimeWorkRequestBuilder<CaptionWorker>()
-            .setInputData(workDataOf(CaptionWorker.KEY_URL to url))
+            .setInputData(workDataOf(CaptionWorker.KEY_URL to url, CaptionWorker.KEY_VISION to vision))
             .setConstraints(net)
             .build()
         WorkManager.getInstance(context)
             .enqueueUniqueWork("cap:$url", ExistingWorkPolicy.KEEP, req)
     }
 
-    suspend fun recaption(context: Context, url: String) {
+    suspend fun recaption(context: Context, url: String, vision: Boolean = false) {
         ScoopzApp.graph.db.dao().setCaptionState(url, CaptionState.NONE)
         WorkManager.getInstance(context).cancelUniqueWork("cap:$url")
-        caption(context, url)
+        caption(context, url, vision)
     }
 
     private fun download(context: Context, url: String, policy: ExistingWorkPolicy) {

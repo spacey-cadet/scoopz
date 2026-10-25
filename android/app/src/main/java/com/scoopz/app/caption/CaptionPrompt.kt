@@ -3,13 +3,54 @@ package com.scoopz.app.caption
 /** Prompt ported from CAPTION_PROMPT in newsbreak_captions.py, adapted to TikTok info plus 1-2 key frames. */
 object CaptionPrompt {
 
-    fun build(pov: String, styleMode: String, title: String?, author: String?, onScreenText: String): String {
+    /** Vision prompt: the model also receives the picked frame(s). */
+    fun build(pov: String, styleMode: String, title: String?, author: String?, onScreenText: String): String =
+        fill(TEMPLATE, pov, styleMode, title, author, onScreenText, emptyList(), "")
+
+    /** Text prompt: no image is sent, so the model works only from the info and on-device labels. */
+    fun buildText(
+        pov: String,
+        styleMode: String,
+        title: String?,
+        author: String?,
+        onScreenText: String,
+        labels: List<String>,
+        transcript: String,
+    ): String {
+        val textTemplate = TEMPLATE
+            .replace(
+                "The image shows 1-2 key frames from it (side by side, in time order if two).",
+                "You cannot see the video: work only from the info below.",
+            )
+            .replace(
+                "- The frames show the action, reaction and mood.",
+                "- The visible-things labels are generic hints about what is on screen. Never invent details beyond them.",
+            )
+            .replace(
+                "CONTEXT: Use the frames only to infer tension/reveals; never mention frames or their order.",
+                "CONTEXT: Never mention that you only have text, labels or frames.",
+            )
+        return fill(textTemplate, pov, styleMode, title, author, onScreenText, labels, transcript)
+    }
+
+    private fun fill(
+        template: String,
+        pov: String,
+        styleMode: String,
+        title: String?,
+        author: String?,
+        onScreenText: String,
+        labels: List<String>,
+        transcript: String,
+    ): String {
         val info = buildString {
             if (!author.isNullOrBlank()) append("- Uploader: @${author.trim()}\n")
             if (!title.isNullOrBlank()) append("- Title/hashtags: ${title.trim().take(300)}\n")
             if (onScreenText.isNotBlank()) append("- Text visible in the video: ${onScreenText.take(300)}\n")
+            if (labels.isNotEmpty()) append("- Visible things (generic on-device labels): ${labels.joinToString(", ")}\n")
+            if (transcript.isNotBlank()) append("- Spoken words (transcript): ${transcript.take(600)}\n")
         }.ifBlank { "- (none available)\n" }
-        return TEMPLATE
+        return template
             .replace("{pov_mode}", pov)
             .replace("{style_mode}", styleMode)
             .replace("{tiktok_info}", info.trimEnd())

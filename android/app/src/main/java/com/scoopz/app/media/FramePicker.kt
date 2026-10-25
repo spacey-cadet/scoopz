@@ -7,6 +7,8 @@ import android.graphics.RectF
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import com.google.mlkit.vision.common.InputImage
+import com.google.mlkit.vision.label.ImageLabeling
+import com.google.mlkit.vision.label.defaults.ImageLabelerOptions
 import com.google.mlkit.vision.face.FaceDetection
 import com.google.mlkit.vision.face.FaceDetector
 import com.google.mlkit.vision.face.FaceDetectorOptions
@@ -31,7 +33,8 @@ import java.io.ByteArrayOutputStream
  * Memory: one full frame is decoded at a time; at most [KEEP] small bitmaps are held.
  */
 object FramePicker {
-    class Picked(val jpeg: ByteArray, val onScreenText: String)
+    /** [labels] are generic on-device descriptions of the frame ("crowd", "microphone"): free, instant, offline. */
+    class Picked(val jpeg: ByteArray, val onScreenText: String, val labels: List<String>)
 
     private const val SAMPLES = 8
     private const val KEEP = 3
@@ -87,12 +90,28 @@ object FramePicker {
                 .joinToString(" | ")
                 .take(300)
 
-            Picked(stitch(chosen), onScreen)
+            val labels = labelFrames(chosen.map { it.bitmap })
+            Picked(stitch(chosen), onScreen, labels)
         } finally {
             kept.forEach { if (!it.bitmap.isRecycled) it.bitmap.recycle() }
             runCatching { faceDetector.close() }
             runCatching { recognizer.close() }
             runCatching { retriever.release() }
+        }
+    }
+
+    /** Top generic labels across the chosen frames, using ML Kit's bundled on-device model. */
+    private suspend fun labelFrames(frames: List<Bitmap>): List<String> {
+        val labeler = ImageLabeling.getClient(ImageLabelerOptions.Builder().setConfidenceThreshold(0.65f).build())
+        try {
+            val found = LinkedHashMap<String, Float>()
+            for (bmp in frames) {
+                val labels = safe { labeler.process(InputImage.fromBitmap(bmp, 0)).await() } ?: continue
+                for (l in labels) found[l.text] = maxOf(found[l.text] ?: 0f, l.confidence)
+            }
+            return found.entries.sortedByDescending { it.value }.map { it.key }.take(6)
+        } finally {
+            runCatching { labeler.close() }
         }
     }
 

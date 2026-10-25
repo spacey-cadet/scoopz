@@ -37,6 +37,8 @@ fun SettingsScreen(onBack: () -> Unit, onFindModels: () -> Unit) {
     val s = ScoopzApp.graph.settings
     var key by remember { mutableStateOf(s.apiKey) }
     var backup by remember { mutableStateOf(s.backupModel) }
+    var textModel by remember { mutableStateOf(s.textModel) }
+    var visionAlways by remember { mutableStateOf(s.visionAlways) }
     var baseUrl by remember { mutableStateOf(s.baseUrl) }
     var model by remember { mutableStateOf(s.model) }
     var rpm by remember { mutableStateOf(s.requestsPerMinute.toString()) }
@@ -48,6 +50,8 @@ fun SettingsScreen(onBack: () -> Unit, onFindModels: () -> Unit) {
         s.baseUrl = baseUrl
         s.model = model
         s.backupModel = backup
+        s.textModel = textModel
+        s.visionAlways = visionAlways
         s.requestsPerMinute = rpm.toIntOrNull() ?: 30
         s.autoCaption = auto
         s.twoFrames = twoFrames
@@ -84,6 +88,16 @@ fun SettingsScreen(onBack: () -> Unit, onFindModels: () -> Unit) {
                 supportingText = { Text("Used automatically if the main model is slow or fails. Blank = off") },
                 singleLine = true,
             )
+            OutlinedTextField(
+                textModel, { textModel = it }, Modifier.fillMaxWidth(),
+                label = { Text("Text model (fast captions)") },
+                supportingText = { Text("Writes captions from the title, on-screen text and labels. No image is sent.") },
+                singleLine = true,
+            )
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Always use the vision model (slower)", Modifier.weight(1f))
+                Switch(visionAlways, { visionAlways = it })
+            }
             TextButton(onClick = { save(); onFindModels() }) { Text("Find models: test which ones work and how fast") }
             OutlinedTextField(
                 baseUrl, { baseUrl = it }, Modifier.fillMaxWidth(),
@@ -108,6 +122,7 @@ fun SettingsScreen(onBack: () -> Unit, onFindModels: () -> Unit) {
                 baseUrl = Settings.DEFAULT_BASE_URL
                 model = Settings.DEFAULT_MODEL
                 backup = Settings.DEFAULT_BACKUP_MODEL
+                textModel = Settings.DEFAULT_TEXT_MODEL
             }) { Text("Reset endpoint and model to defaults") }
         }
     }
