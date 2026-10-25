@@ -20,6 +20,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import com.scoopz.app.ui.LibraryScreen
 import com.scoopz.app.ui.LibraryViewModel
+import com.scoopz.app.ui.ModelFinderScreen
 import com.scoopz.app.ui.SettingsScreen
 
 class MainActivity : ComponentActivity() {
@@ -41,10 +42,18 @@ class MainActivity : ComponentActivity() {
                 else -> lightColorScheme()
             }
             MaterialTheme(colorScheme = scheme) {
-                var showSettings by remember { mutableStateOf(false) }
-                if (showSettings) SettingsScreen { showSettings = false }
-                else LibraryScreen(vm) { showSettings = true }
+                var screen by remember { mutableStateOf(Screen.Library) }
+                when (screen) {
+                    Screen.Library -> LibraryScreen(vm) { screen = Screen.Settings }
+                    Screen.Settings -> SettingsScreen(
+                        onBack = { screen = Screen.Library },
+                        onFindModels = { screen = Screen.Finder },
+                    )
+                    Screen.Finder -> ModelFinderScreen(onBack = { screen = Screen.Settings })
+                }
             }
         }
     }
 }
+
+private enum class Screen { Library, Settings, Finder }
