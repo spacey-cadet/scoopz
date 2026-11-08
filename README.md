@@ -41,6 +41,13 @@ Trade-off: text mode can't describe an action that isn't in the title, text or l
 
 **Audio / transcript (optional):** add a free Groq key in Settings → Transcription. The app copies the video's audio track into a small .m4a on the phone (no re-encoding, about 256 KB of memory), uploads only that audio to Whisper (`whisper-large-v3-turbo`), and feeds the spoken words to the text model. Transcription runs in parallel with the frame scan, so it adds almost no wait. Silence or music returns nothing and is ignored. A transcription failure never blocks the caption; the last problem shows under the key field. NVIDIA's own speech models are gRPC-only, so they can't be called like the chat models; the base URL and model are editable if you want another OpenAI-compatible provider.
 
+**Batched text captions:** text captions are not sent one request per video. Finished-prep videos gather in a small queue and one request writes captions for up to **5 videos** (Settings → *Videos per caption request*, 1–7, 1 = off). The shared instructions are sent once, each video keeps its own POV and style, and the reply comes back as numbered blocks so every caption lands on the right card.
+
+- A batch is sent when it is full, when the oldest video has waited 20 s (so a lone video is never stuck), or ~1.5 s after you tap **Caption** / **Redo** (so a few taps made together still share one request). Whenever a send happens, everything already waiting rides along.
+- If the model skips or garbles one video in a batch, only that video is retried on its own. If the whole request fails, every card in it shows the error and can be redone: it is not retried video by video, which would only multiply the failure.
+- Vision captions (the **Vision** button, *Always use the vision model*, or videos with almost no text info) are never batched, because the free vision models take one image per request.
+- Why 5: the free 8B text model keeps details and per-video POV/style apart reliably at about 5; 6–7 saves a few more requests but cross-contamination and dropped blocks become more likely.
+
 **Redo is instant-ish:** on-screen text, labels and the transcript are cached per video, so Redo only makes one text request.
 
 ### Optimization techniques
@@ -60,7 +67,8 @@ Trade-off: text mode can't describe an action that isn't in the title, text or l
 - The stitched image is a 384 px-high JPEG in 16-bit colour whose quality is lowered until it is under ~140 KB, which keeps requests small and fast.
 - Short responses (`max_tokens` 300) and a request timeout of about 45 s.
 - A slow or failing model automatically falls back to the backup model instead of making you wait.
-- Up to 3 captions run in parallel. Each card updates on its own as soon as its caption is ready.
+- Text captions are batched: up to 5 videos share one API request (see *Batched text captions* above), so the shared instructions are sent once and the requests-per-minute budget goes about 5x further.
+- Up to 3 videos are prepared on the phone at once (frame scan, OCR, transcription). Each card updates as soon as its caption is ready.
 - A rate limiter spaces requests to stay under the free tier's requests-per-minute cap, and a `429` response pauses all queued requests for the server's `Retry-After` time.
 - An alternative image format is tried automatically if a model rejects the first one.
 

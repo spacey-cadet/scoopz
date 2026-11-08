@@ -36,9 +36,19 @@ object Enqueue {
         download(context, url, ExistingWorkPolicy.REPLACE)
     }
 
-    fun caption(context: Context, url: String, vision: Boolean = false) {
+    /**
+     * [urgent] = the person asked for this caption (Caption / Redo), so it is sent after a short pause
+     * instead of waiting for a fuller batch. Auto-captions after a download are not urgent.
+     */
+    fun caption(context: Context, url: String, vision: Boolean = false, urgent: Boolean = false) {
         val req = OneTimeWorkRequestBuilder<CaptionWorker>()
-            .setInputData(workDataOf(CaptionWorker.KEY_URL to url, CaptionWorker.KEY_VISION to vision))
+            .setInputData(
+                workDataOf(
+                    CaptionWorker.KEY_URL to url,
+                    CaptionWorker.KEY_VISION to vision,
+                    CaptionWorker.KEY_URGENT to urgent,
+                )
+            )
             .setConstraints(net)
             .build()
         WorkManager.getInstance(context)
@@ -48,7 +58,7 @@ object Enqueue {
     suspend fun recaption(context: Context, url: String, vision: Boolean = false) {
         ScoopzApp.graph.db.dao().setCaptionState(url, CaptionState.NONE)
         WorkManager.getInstance(context).cancelUniqueWork("cap:$url")
-        caption(context, url, vision)
+        caption(context, url, vision, urgent = true)
     }
 
     private fun download(context: Context, url: String, policy: ExistingWorkPolicy) {

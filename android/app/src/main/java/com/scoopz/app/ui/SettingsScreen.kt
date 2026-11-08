@@ -42,6 +42,7 @@ fun SettingsScreen(onBack: () -> Unit, onFindModels: () -> Unit) {
     var baseUrl by remember { mutableStateOf(s.baseUrl) }
     var model by remember { mutableStateOf(s.model) }
     var rpm by remember { mutableStateOf(s.requestsPerMinute.toString()) }
+    var batch by remember { mutableStateOf(s.batchSize.toString()) }
     var auto by remember { mutableStateOf(s.autoCaption) }
     var twoFrames by remember { mutableStateOf(s.twoFrames) }
     var sttKey by remember { mutableStateOf(s.sttKey) }
@@ -56,6 +57,7 @@ fun SettingsScreen(onBack: () -> Unit, onFindModels: () -> Unit) {
         s.textModel = textModel
         s.visionAlways = visionAlways
         s.requestsPerMinute = rpm.toIntOrNull() ?: 30
+        s.batchSize = batch.toIntOrNull() ?: Settings.DEFAULT_BATCH_SIZE
         s.autoCaption = auto
         s.twoFrames = twoFrames
         s.sttKey = sttKey
@@ -112,6 +114,18 @@ fun SettingsScreen(onBack: () -> Unit, onFindModels: () -> Unit) {
             OutlinedTextField(
                 rpm, { rpm = it.filter(Char::isDigit).take(2) }, Modifier.fillMaxWidth(),
                 label = { Text("Max requests per minute (1–40)") },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                singleLine = true,
+            )
+            OutlinedTextField(
+                batch, { batch = it.filter(Char::isDigit).take(1) }, Modifier.fillMaxWidth(),
+                label = { Text("Videos per caption request (1–${Settings.MAX_BATCH_SIZE})") },
+                supportingText = {
+                    Text(
+                        "Text captions for several videos are written in one API request. " +
+                            "Recommended: ${Settings.DEFAULT_BATCH_SIZE}. 1 = off. Vision captions are never batched.",
+                    )
+                },
                 keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
                 singleLine = true,
             )

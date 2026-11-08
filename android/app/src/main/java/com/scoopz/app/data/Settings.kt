@@ -77,6 +77,15 @@ class Settings(context: Context) {
         get() = prefs.getInt("rpm", 30)
         set(v) = prefs.edit().putInt("rpm", v.coerceIn(1, 40)).apply()
 
+    /**
+     * How many videos share one text-caption request (1 = off, one request per video).
+     * 5 is the sweet spot for the free 8B text model: it keeps each video's details apart and
+     * its POV/style instructions straight; 6-7 saves a few more requests but gets less reliable.
+     */
+    var batchSize: Int
+        get() = prefs.getInt("batch_size", DEFAULT_BATCH_SIZE).coerceIn(1, MAX_BATCH_SIZE)
+        set(v) = prefs.edit().putInt("batch_size", v.coerceIn(1, MAX_BATCH_SIZE)).apply()
+
     /** Rotation state for caption POV / style (persisted like ~/.cache/scoopz_pov.json). */
     var povLast: String
         get() = prefs.getString("pov_last", "third") ?: "third"
@@ -93,6 +102,8 @@ class Settings(context: Context) {
         const val DEFAULT_STT_BASE_URL = "https://api.groq.com/openai/v1"
         const val DEFAULT_STT_MODEL = "whisper-large-v3-turbo"
         const val DEFAULT_TEXT_MODEL ="meta/llama-3.1-8b-instruct" // a guess: confirm it with Find models
+        const val DEFAULT_BATCH_SIZE = 5
+        const val MAX_BATCH_SIZE = 7
         private const val RETIRED_BACKUP_MODEL = "microsoft/phi-3-vision-128k-instruct"
     }
 }

@@ -8,6 +8,7 @@ import coil.ImageLoaderFactory
 import coil.decode.VideoFrameDecoder
 import coil.disk.DiskCache
 import coil.memory.MemoryCache
+import com.scoopz.app.caption.CaptionBatcher
 import com.scoopz.app.caption.NvidiaCaptioner
 import com.scoopz.app.caption.Transcriber
 import com.scoopz.app.caption.RateLimiter
@@ -35,6 +36,9 @@ class Graph(app: Application) {
     val tikwm = TikwmClient(http)
     val limiter = RateLimiter { settings.requestsPerMinute }
     val captioner = NvidiaCaptioner(http, settings, limiter)
+
+    /** Gathers text captions from the workers and sends several videos per API request. */
+    val batcher = CaptionBatcher(appScope, captioner, settings)
     val errorAi = ErrorAi(http, settings, limiter)
     val modelFinder = ModelFinder(http, settings, limiter)
 
